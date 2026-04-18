@@ -1077,9 +1077,9 @@ def main():
     player_damage_taken = 0
     team_coordination_score = 0
 
-    # 追踪总游戏数，默认1000局后自动退出，防止无限循环
+    # 追踪总游戏数，使用配置文件中的 MAX_GAME_TIMES
     total_games = 0
-    max_games = 1000
+    max_games = MAX_GAME_TIMES
 
     # Game Over 自动重启定时器
     game_over_timer = 0

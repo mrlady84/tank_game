@@ -1,6 +1,8 @@
 """
 Game configuration constants
 """
+# total games to simulate for training
+MAX_GAME_TIMES = 10000
 
 # Screen and tile settings
 TILE_SIZE = 32
