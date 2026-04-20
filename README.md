@@ -4,6 +4,10 @@ A smart tank battle game powered by **Q-learning** and **Genetic Algorithms**.
 
 [中文文档](README_cn.md)
 
+## Demo Running
+
+![alt text](assets/demo_running.png)
+
 ## 🎯 Features
 
 - **Dual AI System**:
