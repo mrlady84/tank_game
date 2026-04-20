@@ -186,14 +186,6 @@ except FileNotFoundError as e:
     logging.error(f"Please check that the assets directory exists and contains all required files")
     sys.exit(1)
 
-PLAYER_SHOT_DELAY = 200  # 提高射击频率
-ENEMY_SHOT_DELAY = 1200
-START_LIVES = 10  # 玩家坦克可以抗住10次射击
-EXPLOSION_DURATION = 8
-MAX_ENEMIES = 5  # 敌方坦克数量
-CANDIDATE_TANKS = 5  # 总候选坦克
-PLAYER_TANK_COUNT = 2  # 玩家AI坦克数量
-
 FONT = pygame.font.Font(None, 22)
 LARGE_FONT = pygame.font.Font(None, 36)
 
@@ -242,6 +234,11 @@ class Tank:
         self.last_action = None  # 显式初始化，避免None错误
         # Hit points for player tanks
         self.hit_points = START_LIVES if team == 'player' else 1
+        # 击中标记：用于AI奖励计算
+        self.hit_player_this_frame = False
+        self.killed_player_this_frame = False
+        # 直线射击标记：当敌方坦克与玩家在一条直线上成功发射炮弹
+        self.straight_shot_this_frame = False
 
     def update_rect(self):
         self.rect.topleft = (int(self.x), int(self.y))
@@ -312,7 +309,7 @@ class Tank:
         else:
             x = self.x - 6
             y = self.y + TILE_SIZE // 2 - 3
-        return Bullet(x, y, self.direction, self.team)
+        return Bullet(x, y, self.direction, self.team, owner_tank=self)
 
     def try_fire(self, target, current_time, walls):
         if not self.can_shoot(current_time):
@@ -336,10 +333,11 @@ class Tank:
         return None
 
 class Bullet:
-    def __init__(self, x, y, direction, owner):
+    def __init__(self, x, y, direction, owner, owner_tank=None):
         self.direction = direction
         self.speed = 8
         self.owner = owner
+        self.owner_tank = owner_tank  # 存储发射该子弹的坦克对象引用
         self.rect = pygame.Rect(x, y, 6, 6)
         self.prev_rect = self.rect.copy()
 
@@ -417,6 +415,35 @@ def can_move_rect(rect, dx, dy, walls):
         if wall.colliderect(path_rect):
             return False
     return True
+
+
+def has_clear_line_improved(source_rect, target_rect, walls, tolerance=TILE_SIZE):
+    """
+    改进的直线检测函数，允许一定角度偏差
+    tolerance: 允许的偏差范围（像素）
+    """
+    # 计算中心点
+    src_x, src_y = source_rect.centerx, source_rect.centery
+    tgt_x, tgt_y = target_rect.centerx, target_rect.centery
+
+    # 检查是否在同一水平线或垂直线上，允许一定容差
+    if abs(src_x - tgt_x) <= tolerance or abs(src_y - tgt_y) <= tolerance:
+        # 创建子弹路径矩形
+        if abs(src_x - tgt_x) < abs(src_y - tgt_y):  # 主要是垂直方向
+            start_y = min(src_y, tgt_y)
+            end_y = max(src_y, tgt_y)
+            line_rect = pygame.Rect(src_x - 2, start_y, 4, end_y - start_y)
+        else:  # 主要是水平方向
+            start_x = min(src_x, tgt_x)
+            end_x = max(src_x, tgt_x)
+            line_rect = pygame.Rect(start_x, src_y - 2, end_x - start_x, 4)
+
+        # 检查路径上是否有墙壁
+        for wall in walls:
+            if line_rect.colliderect(wall):
+                return False
+        return True
+    return False
 
 
 def handle_enemy_collision(bullet, bullet_rect, enemies, explosions, bullets, score, candidate_tanks, players=None, q_agent_instance=None, enemy_ais=None, global_hybrid_agents=None):
@@ -503,12 +530,15 @@ def get_enemy_spawn_positions(map_data, max_count, existing_tanks=None):
     return positions[:max_count]
 
 
-def draw_hud(score, total_hp, candidate_tanks, player_count):
+def draw_hud(score, total_hp, candidate_tanks, player_count, player_wins=0, enemy_wins=0):
+    total_games = player_wins + enemy_wins
+    win_rate = (player_wins / total_games * 100) if total_games > 0 else 0.0
     labels = [
         f'SCORE: {score:04d}',
         f'PLAYER HP: {total_hp}',
         f'PLAYERS: {player_count}',
         f'ENEMIES: {candidate_tanks}',
+        f'WIN: {player_wins}  LOSE: {enemy_wins}  ({win_rate:.1f}%)',
         'AI CONTROLLED'
     ]
     for idx, text in enumerate(labels):
@@ -848,71 +878,130 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 bullets.append(player.shoot(current_time))
 
     # 敌方AI决策更新 - 使用HybridAgent智能系统（Q-learning + 遗传算法）
-    if current_time - enemy_ai_timer > 200:
+    # 优化：提高决策频率，更快追击玩家 (200ms -> 100ms)
+    if current_time - enemy_ai_timer > 100:
         enemy_ai_timer = current_time
-        
+
         # 为每个敌方坦克执行HybridAgent决策
         for enemy in enemies:
             enemy_hybrid = enemy_ais.get(enemy)
             if not enemy_hybrid or not reference_player:
                 continue
-            
+
             # 获取状态
             state = enemy_hybrid.get_state(enemy, reference_player, wall_rects, enemies)
-            
+
             # 获取动作
             action = enemy_hybrid.get_action(state)
-            
+
             # 如果有上一步的状态和动作，记录经验
             if enemy.last_state is not None and enemy.last_action is not None:
-                # 计算奖励
+                # 计算奖励 - 优化：更激进的追击奖励
                 reward = 0.1  # 基础生存奖励
-                
+
                 # 检查是否接近玩家
                 dist_to_player = math.hypot(
                     enemy.rect.centerx - reference_player.rect.centerx,
                     enemy.rect.centery - reference_player.rect.centery
                 )
-                
-                if dist_to_player < 100:
-                    reward += 1.0  # 接近玩家奖励
-                elif dist_to_player > 300:
-                    reward -= 0.1  # 远离玩家惩罚
-                
+
+                # 优化：加大接近奖励，鼓励追击
+                if dist_to_player < 80:
+                    reward += 2.0  # 近距离高奖励 (原1.0)
+                elif dist_to_player < 150:
+                    reward += 1.5  # 中距离奖励 (新增)
+                elif dist_to_player < 250:
+                    reward += 0.5  # 较近距离奖励 (新增)
+                elif dist_to_player > 400:
+                    reward -= 0.5  # 远离惩罚加大 (原0.1)
+
+                # 击中玩家奖励
+                if enemy.hit_player_this_frame:
+                    reward += 5.0  # 击中玩家 +5
+                    enemy.hit_player_this_frame = False  # 重置标记
+
+                # 击杀玩家奖励
+                if enemy.killed_player_this_frame:
+                    reward += 15.0  # 击杀玩家 +15
+                    enemy.killed_player_this_frame = False  # 重置标记
+
+                # 直线射击奖励
+                if enemy.straight_shot_this_frame:
+                    reward += 2.0  # 直线射击 +2
+                    enemy.straight_shot_this_frame = False  # 重置标记
+
                 # 记录经验
                 new_state = enemy_hybrid.get_state(enemy, reference_player, wall_rects, enemies)
                 enemy_hybrid.add_experience(enemy.last_state, enemy.last_action, reward, new_state)
                 enemy_hybrid.update_q_value(enemy.last_state, enemy.last_action, reward, new_state)
-            
+
             # 更新状态
             enemy.last_state = state
             enemy.last_action = action
+
+            # 优化：添加直接追击逻辑
+            # 计算最佳追击方向
+            dx_player = reference_player.rect.centerx - enemy.rect.centerx
+            dy_player = reference_player.rect.centery - enemy.rect.centery
             
-            # 转换为方向
+            # 确定主要追击方向
+            if abs(dx_player) > abs(dy_player):
+                # 水平方向追击
+                preferred_dir = 1 if dx_player > 0 else 3  # 右或左
+            else:
+                # 垂直方向追击
+                preferred_dir = 2 if dy_player > 0 else 0  # 下或上
+            
+            # 尝试优先使用Q-learning建议的方向，如果不行则使用追击方向
             directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 上、右、下、左
             dx, dy = directions[action]
-            
+
             # 检查是否可行
             from tank_ai import can_move_rect
             if can_move_rect(enemy.rect, dx * enemy.speed, dy * enemy.speed, wall_rects):
                 enemy.direction = action
             else:
-                # 回退到随机可行方向
-                import random
-                random_directions = [0, 1, 2, 3]
-                random.shuffle(random_directions)
-                for dir_idx in random_directions:
-                    ddx, ddy = directions[dir_idx]
-                    if can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, wall_rects):
-                        enemy.direction = dir_idx
-                        break
+                # 优化：优先尝试追击方向
+                dx_preferred, dy_preferred = directions[preferred_dir]
+                if can_move_rect(enemy.rect, dx_preferred * enemy.speed, dy_preferred * enemy.speed, wall_rects):
+                    enemy.direction = preferred_dir
+                else:
+                    # 回退到随机可行方向
+                    import random
+                    random_directions = [0, 1, 2, 3]
+                    random.shuffle(random_directions)
+                    for dir_idx in random_directions:
+                        ddx, ddy = directions[dir_idx]
+                        if can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, wall_rects):
+                            enemy.direction = dir_idx
+                            break
 
-            # 智能射击决策
+            # 智能射击决策 - 放宽条件，提高敌方活跃度
             if enemy.can_shoot(current_time):
-                # 检查是否有清晰射界
-                if has_clear_line(enemy.rect, reference_player.rect, wall_rects):
-                    shot = enemy.shoot(current_time)
-                    bullets.append(shot)
+                # 检查是否面向玩家（允许一定角度偏差）
+                dx = reference_player.rect.centerx - enemy.rect.centerx
+                dy = reference_player.rect.centery - enemy.rect.centery
+                
+                # 根据方向检查是否大致朝向玩家
+                facing_player = False
+                if enemy.direction == 0:  # 上
+                    facing_player = dy < 0 and abs(dx) < TILE_SIZE * 2
+                elif enemy.direction == 1:  # 右
+                    facing_player = dx > 0 and abs(dy) < TILE_SIZE * 2
+                elif enemy.direction == 2:  # 下
+                    facing_player = dy > 0 and abs(dx) < TILE_SIZE * 2
+                elif enemy.direction == 3:  # 左
+                    facing_player = dx < 0 and abs(dy) < TILE_SIZE * 2
+                
+                if facing_player:
+                    # 检查是否有清晰射界（使用改进版，允许一定容差）
+                    if has_clear_line_improved(enemy.rect, reference_player.rect, wall_rects):
+                        # 检测是否在一条直线上射击（水平或垂直对齐）
+                        if (abs(enemy.rect.centerx - reference_player.rect.centerx) < TILE_SIZE // 2 or
+                            abs(enemy.rect.centery - reference_player.rect.centery) < TILE_SIZE // 2):
+                            enemy.straight_shot_this_frame = True
+                        shot = enemy.shoot(current_time)
+                        bullets.append(shot)
 
     # 所有坦克执行移动 - 优化：避免创建生成器
     for tank in all_tanks:
@@ -975,6 +1064,12 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                     bullets_to_remove.append(bullet)
                     player.hit_points -= 1
 
+                    # 标记击中玩家的敌方坦克（用于AI奖励）
+                    if hasattr(bullet, 'owner_tank') and bullet.owner_tank and bullet.owner_tank in enemies:
+                        bullet.owner_tank.hit_player_this_frame = True
+                        if player.hit_points <= 0:
+                            bullet.owner_tank.killed_player_this_frame = True
+
                     if player.hit_points <= 0:
                         players.remove(player)  # 玩家HP为0时从列表移除
 
@@ -1016,7 +1111,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
     return 'playing', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache
 
 
-def render_game(screen, players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles):
+def render_game(screen, players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, player_wins=0, enemy_wins=0):
     """
     渲染函数 - 只负责绘制，不处理逻辑
     """
@@ -1062,7 +1157,7 @@ def render_game(screen, players, enemies, bullets, explosions, score, candidate_
         explosion.draw()
     
     total_hp = sum(p.hit_points for p in players) if players else 0
-    draw_hud(score, total_hp, candidate_tanks, len(players))
+    draw_hud(score, total_hp, candidate_tanks, len(players), player_wins, enemy_wins)
     draw_sidebar(candidate_tanks)
 
 
@@ -1099,6 +1194,10 @@ def main():
     # 追踪总游戏数，使用配置文件中的 MAX_GAME_TIMES
     total_games = 0
     max_games = MAX_GAME_TIMES
+
+    # 胜率统计
+    player_wins = 0
+    enemy_wins = 0
 
     # Game Over 自动重启定时器
     game_over_timer = 0
@@ -1139,11 +1238,12 @@ def main():
 
             # 渲染
             if game_state == 'playing':
-                render_game(screen, players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles)
+                render_game(screen, players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, player_wins, enemy_wins)
 
-                # 检查是否所有坦克都被击杀
+                # 检查是否所有坦克都被击杀（玩家胜利）
                 if candidate_tanks <= 0 and len(enemies) == 0:
                     logging.info(f"所有坦克已击杀！准备重新开始第 {total_games + 1} 局")
+                    player_wins += 1  # 玩家胜利
                     game_end_time = pygame.time.get_ticks()
                     survival_time = (game_end_time - game_start_time) / 1000.0
 
@@ -1180,6 +1280,7 @@ def main():
             elif game_state == 'eagle_destroyed':
                 # 老鹰被打掉，立即重开一局（无延迟）
                 logging.info(f"🦅 老鹰阵亡！立即重新开始第 {total_games + 1} 局")
+                enemy_wins += 1  # 敌方胜利
 
                 # ✅ 收集本局数据并传给 AI，激活遗传算法
                 survival_time = (current_time - game_start_time) / 1000.0
@@ -1224,6 +1325,7 @@ def main():
                     game_over_timer = current_time
                 
                 if current_time - game_over_timer > 2000:
+                    enemy_wins += 1  # 敌方胜利（玩家全灭）
                     game_end_time = pygame.time.get_ticks()
                     survival_time = (game_end_time - game_start_time) / 1000.0
                     

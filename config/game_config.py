@@ -24,12 +24,13 @@ SCORE_BRICK = 30
 SCORE_ENEMY = 100
 SCORE_BASE = 500
 
-PLAYER_SHOT_DELAY = 100  # 提高射击频率（原 350ms）
-ENEMY_SHOT_DELAY = 1200
-START_LIVES = 3
+PLAYER_SHOT_DELAY = 200  # 我方射击冷却时间200ms
+ENEMY_SHOT_DELAY = 400   # 敌方射击冷却时间400ms
+START_LIVES = 10  # 玩家坦克可以抗住10次射击
 EXPLOSION_DURATION = 8
-MAX_ENEMIES = 5
-CANDIDATE_TANKS = 5  # 总候选坦克也降低
+MAX_ENEMIES = 5  # 敌方坦克数量
+CANDIDATE_TANKS = 15  # 总候选坦克
+PLAYER_TANK_COUNT = 2  # 玩家AI坦克数量
 
 # Directions mapping
 DIRECTIONS = [(0, -1), (0, 1), (1, 0), (-1, 0)]  # up, down, right, left

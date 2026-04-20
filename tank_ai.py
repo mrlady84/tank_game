@@ -55,7 +55,7 @@ import pygame
 import bisect
 from config.ai_config import *
 from config.game_config import TILE_SIZE, SCREEN_COLS, SCREEN_ROWS
-from utils.geometry import line_intersects_rect, line_intersects_line, is_between
+from utils.geometry import line_intersects_rect, is_between
 
 # PLAYFIELD_RECT will be initialized at runtime
 PLAYFIELD_RECT = None
@@ -1082,8 +1082,10 @@ class HybridAgent:
         if not self.model_file:
             return
         try:
+            # 将 defaultdict 转换为普通 dict 以便 pickle 序列化
+            q_table_dict = dict(self.q_agent.q_table)
             data = {
-                'q_table': self.q_agent.q_table,
+                'q_table': q_table_dict,
                 'best_individual': self.genetic_optimizer.best_individual,
                 'best_fitness': self.genetic_optimizer.best_fitness,
                 'generation': self.genetic_optimizer.generation,
@@ -1106,7 +1108,8 @@ class HybridAgent:
                 data = pickle.load(f)
             
             if 'q_table' in data:
-                self.q_agent.q_table = data['q_table']
+                # 将普通 dict 转换回 defaultdict
+                self.q_agent.q_table = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0], data['q_table'])
             if 'best_individual' in data:
                 self.genetic_optimizer.best_individual = data['best_individual']
                 self.genetic_optimizer.best_fitness = data.get('best_fitness', -float('inf'))

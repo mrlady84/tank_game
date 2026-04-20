@@ -93,13 +93,41 @@ tank_game/
 
 ### AutoAI (Player AI)
 
-| Feature | Description |
-|---------|-------------|
-| **Target Locking** | Prioritizes nearest enemy tank |
-| **A* Pathfinding** | Manhattan distance heuristic, max 200 iterations |
-| **Brick Detection** | Auto-shoots to clear bricks in path |
-| **Anti-Stuck** | Random turn if unable to move for 1 second |
-| **Target Switch** | Switch target if movement < 3 units in 3 seconds |
+AutoAI is a target-locking + automatic pathfinding algorithm designed for player tanks.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        AutoAI Architecture                       │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Decision Loop (150ms)                     │ │
+│  │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │ │
+│  │  │Select Target │───→│  Plan Path   │───→│Execute Move  │  │ │
+│  │  │(Nearest)     │    │(A* Algorithm)│    │& Shoot       │  │ │
+│  │  └──────────────┘    └──────────────┘    └──────────────┘  │ │
+│  │         │                   │                   │           │ │
+│  │         ▼                   ▼                   ▼           │ │
+│  │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │ │
+│  │  │Stuck Detect  │    │200 Iter Max  │    │Brick Detect  │  │ │
+│  │  │(3s < 3units) │    │Manhattan Dist│    │Auto-Shoot    │  │ │
+│  │  └──────────────┘    └──────────────┘    └──────────────┘  │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| Component | Description | Implementation |
+|-----------|-------------|----------------|
+| **Target Selection** | Lock nearest enemy, switch if stuck for 3s | `select_target()` - Distance-based with random switch |
+| **A* Pathfinding** | Manhattan heuristic, grid-based navigation | `plan_path()` - 200 iteration limit, O(n log n) |
+| **Brick Detection** | Detect bricks ahead, auto-shoot to clear | `_check_brick_ahead()` - 1.2 tile check distance |
+| **Anti-Stuck** | Random direction change when immobile | Stuck counter > 60 frames (1s) triggers random direction |
+| **Shooting** | Fire when target aligned (1.2 tile tolerance) | `should_fire()` - Direction-aligned with tolerance |
+
+**AutoAI Parameters:**
+- Decision interval: 150ms
+- Stuck threshold: 3 seconds with < 3 units movement
+- Path length limit: 30 steps
+- Brick detection range: 1.2 tiles ahead
+- Shooting tolerance: 1.2 tiles (allows near-miss)
 
 ### HybridAgent (Enemy AI)
 
@@ -115,6 +143,81 @@ Observe State → ε-greedy Action Selection → Execute → Get Reward → Upda
        ↓
 Record Experience → Prioritized Replay → Genetic Evolution (every 10 games)
 ```
+
+### HybridAgent Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           HybridAgent (Enemy AI)                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                    Unified Interface for All Enemy Tanks                 │    │
+│  │                    (Shared Q-Table + Genetic Parameters)                 │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                             │
+│           ┌────────────────────────┼────────────────────────┐                    │
+│           ▼                        ▼                        ▼                    │
+│  ┌─────────────────┐    ┌──────────────────┐    ┌───────────────────┐           │
+│  │  QLearningAgent │    │ GeneticOptimizer │    │PerformanceOptimizer│           │
+│  │                 │    │                  │    │                   │           │
+│  │  ┌───────────┐  │    │  ┌────────────┐  │    │  ┌──────────────┐ │           │
+│  │  │ Q-Table   │  │    │  │Population  │  │    │  │ State Cache  │ │           │
+│  │  │(432 states│  │    │  │(size=10)   │  │    │  │ (20-frame    │ │           │
+│  │  │ x 4 acts) │  │    │  │            │  │    │  │   TTL)       │ │           │
+│  │  └───────────┘  │    │  └────────────┘  │    │  └──────────────┘ │           │
+│  │        │        │    │        │         │    │        │          │           │
+│  │  ┌─────▼─────┐  │    │  ┌─────▼─────┐   │    │  ┌─────▼─────┐   │           │
+│  │  │ ε-greedy  │  │◄───┼──┤Best Params│   │    │  │ Reward    │   │           │
+│  │  │  Action   │  │    │  │  (elite)  │   │    │  │  Cache    │   │           │
+│  │  │ Selection │  │    │  └───────────┘   │    │  └───────────┘   │           │
+│  │  └───────────┘  │    │        │         │    │                   │           │
+│  │        │        │    │  ┌─────▼─────┐   │    │                   │           │
+│  │  ┌─────▼─────┐  │    │  │Tournament │   │    │                   │           │
+│  │  │ Prioritized│  │    │  │ Selection │   │    │                   │           │
+│  │  │  Replay   │  │    │  └───────────┘   │    │                   │           │
+│  │  │  Buffer   │  │    │        │         │    │                   │           │
+│  │  └───────────┘  │    │  ┌─────▼─────┐   │    │                   │           │
+│  └─────────────────┘    │  │Crossover+ │   │    └───────────────────┘           │
+│           │             │  │ Mutation  │   │                                    │
+│           ▼             │  └───────────┘   │                                    │
+│  ┌──────────────────┐   └──────────────────┘                                    │
+│  │   Game Engine    │              ▲                                             │
+│  │ ┌──────────────┐ │              │                                             │
+│  │ │ State:       │ │              │  Evolve every 10 games                       │
+│  │ │ - Position   │ │──────────────┘                                             │
+│  │ │ - Distance   │ │                                                             │
+│  │ │ - Direction  │ │                                                             │
+│  │ │ - Obstacle   │ │                                                             │
+│  │ │ - Ally       │ │                                                             │
+│  │ └──────────────┘ │                                                             │
+│  │        │         │                                                             │
+│  │        ▼         │                                                             │
+│  │ ┌──────────────┐ │                                                             │
+│  │ │ Reward:      │ │                                                             │
+│  │ │ +0.1 Survive │ │                                                             │
+│  │ │ +1.0 Near    │ │                                                             │
+│  │ │ +2.0 Straight│ │                                                             │
+│  │ │ +5.0 Hit     │ │                                                             │
+│  │ │ +15.0 Kill   │ │                                                             │
+│  │ └──────────────┘ │                                                             │
+│  └──────────────────┘                                                             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Model Components Description:**
+
+| Component | Key Features | Optimization |
+|-----------|--------------|--------------|
+| **QLearningAgent** | 432 state space, 4 actions, ε-greedy policy | LRU eviction (max 5000 states) |
+| **PrioritizedReplayBuffer** | TD-error based sampling, importance weighting | Binary search O(log n) |
+| **GeneticOptimizer** | Tournament selection, single-point crossover, Gaussian mutation | Elitism (top 2 preserved) |
+| **PerformanceOptimizer** | State/Reward caching, distance LUT | 85-92% cache hit rate |
+
+**Learning Pipeline:**
+1. **State Observation** → 432-dimensional state encoding (position, distance, direction, obstacle, ally)
+2. **Action Selection** → ε-greedy: explore (random) vs exploit (max Q-value)
+3. **Experience Storage** → (s, a, r, s') stored in prioritized replay buffer
+4. **Q-Value Update** → `Q(s,a) ← Q(s,a) + α[r + γ·max_a'Q(s',a') - Q(s,a)]`
+5. **Genetic Evolution** → Every 10 games, evolve hyperparameters (α, γ, ε)
 
 ## 📊 Performance Optimization
 
@@ -176,6 +279,14 @@ python -m pytest tests/test_performance.py
 - Evolution threshold: 10 games
 - Population size: 10
 
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Complete Project Documentation (Chinese)](doc/项目完整说明文档.md) | Full project documentation |
+| [BUGFIX_SUMMARY.md](doc/BUGFIX_SUMMARY.md) | Bug fix summary |
+| [ProjectDetails.md](doc/ProjectDetails.md) | Project tech details reference |
+
 ## 🎮 Controls
 
 | Key | Action |
@@ -235,6 +346,19 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 3. Update documentation as needed
 4. Run full test suite before submitting
 
+## 🐛 Known Issues
+
+- Q-table may approach limit (5000 states) after extended runtime
+- Brief stuttering may occur in dense multi-tank scenarios
+
+## 🚀 Future Improvements
+
+- [ ] Add difficulty levels (Easy/Normal/Hard)
+- [ ] Implement team coordination AI (flanking/suppression tactics)
+- [ ] Support manual player control
+- [ ] Add game replay functionality
+- [ ] Replace Q-table with neural networks
+
 ## 📄 License
 
 This project is for educational and demonstration purposes.
@@ -253,8 +377,28 @@ This project is for educational and demonstration purposes.
 - **AI Learning**: ✅ Working (continuous evolution)
 - **Production Ready**: ✅ Yes
 
+## 📝 Changelog
+
+### v3.0 (2026-04-20) - Major Update
+- ✅ Added straight shot reward mechanism
+- ✅ Added hit/kill player reward system
+- ✅ Reduced enemy shot delay (1200ms → 600ms)
+- ✅ Fixed pickle serialization for defaultdict Q-table
+- ✅ Synchronized README.md and README_cn.md content
+- ✅ Removed unused imports (`choose_enemy_direction`, `performance_monitor`, `line_intersects_line`)
+
+### v2.0 (2026-04-10) - Progressive Evolution
+- ✅ Implemented three-stage progressive evolution strategy
+- ✅ Fixed stage 2 population initialization bug
+- ✅ Fixed exploration rate double decay issue
+
+### v1.0 (2026-04-09) - Initial Release
+- ✅ Project overview and system architecture
+- ✅ AI system documentation
+- ✅ Game mechanics documentation
+
 ---
 
-**Version**: v2.0  
-**Last Updated**: April 9, 2026  
-**Python Version**: 3.8+ 
+**Version**: v3.0
+**Last Updated**: April 20, 2026
+**Python Version**: 3.8+
