@@ -129,11 +129,28 @@ try:
     logging.info("Tank and bullet images loaded successfully")
 
     # 创建黄色和蓝色的玩家坦克图像
+    # 使用LRU缓存避免重复计算相同的着色
+    from functools import lru_cache
+    
+    def _tint_image_key(surface, target_color):
+        """生成缓存键 - 使用surface的id和颜色"""
+        return (id(surface), target_color)
+    
+    _tint_cache = {}
+    
     def tint_image(surface, target_color):
-        """给图像着色 - 直接修改像素颜色"""
+        """
+        给图像着色 - 直接修改像素颜色
+        优化版：使用缓存避免重复计算
+        """
+        # 检查缓存
+        cache_key = (id(surface), target_color)
+        if cache_key in _tint_cache:
+            return _tint_cache[cache_key]
+        
         tinted = surface.copy()
         width, height = tinted.get_size()
-        
+
         for x in range(width):
             for y in range(height):
                 pixel = tinted.get_at((x, y))
@@ -148,7 +165,9 @@ try:
                         new_g = int(target_color[1] * scale)
                         new_b = int(target_color[2] * scale)
                         tinted.set_at((x, y), (new_r, new_g, new_b, pixel.a))
-        
+
+        # 存入缓存
+        _tint_cache[cache_key] = tinted
         return tinted
 
     # 黄色坦克

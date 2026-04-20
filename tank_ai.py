@@ -47,7 +47,7 @@ import os
 import random
 import pickle
 import math
-from collections import deque
+from collections import deque, defaultdict
 import copy
 import time
 import logging
@@ -215,6 +215,57 @@ TILE_SIZE = 32
 
 class PerformanceOptimizer:
     """性能优化缓存系统"""
+    
+    # 预计算距离奖励LUT (Lookup Table) - 避免运行时if-elif链
+    # 距离分段: 每20像素一个桶，最大500像素
+    _DISTANCE_BUCKETS = 25  # 500 / 20
+    
+    def _init_reward_lut(self):
+        """初始化奖励查找表"""
+        # aggressor: 近距离进攻型
+        # flanker: 侧翼包抄型
+        # suppressor: 远程压制型
+        self._reward_lut = {
+            'aggressor': [0.0] * self._DISTANCE_BUCKETS,
+            'flanker': [0.0] * self._DISTANCE_BUCKETS,
+            'suppressor': [0.0] * self._DISTANCE_BUCKETS
+        }
+        
+        bucket_size = 20  # 每个桶20像素
+        for i in range(self._DISTANCE_BUCKETS):
+            dist = i * bucket_size
+            
+            # aggressor LUT
+            if dist < 80:
+                self._reward_lut['aggressor'][i] = 2.0
+            elif dist < 150:
+                self._reward_lut['aggressor'][i] = 1.0
+            elif dist > 300:
+                self._reward_lut['aggressor'][i] = -0.5
+            else:
+                self._reward_lut['aggressor'][i] = 0.0
+            
+            # flanker LUT
+            if 120 < dist < 250:
+                self._reward_lut['flanker'][i] = 1.5
+            elif dist > 350:
+                self._reward_lut['flanker'][i] = -0.3
+            else:
+                self._reward_lut['flanker'][i] = 0.0
+            
+            # suppressor LUT
+            if 200 < dist < 350:
+                self._reward_lut['suppressor'][i] = 1.0
+            elif dist < 100:
+                self._reward_lut['suppressor'][i] = -0.5
+            else:
+                self._reward_lut['suppressor'][i] = 0.0
+    
+    def _get_distance_reward(self, distance, role):
+        """使用LUT快速获取距离奖励"""
+        bucket = min(int(distance / 20), self._DISTANCE_BUCKETS - 1)
+        return self._reward_lut.get(role, self._reward_lut['suppressor'])[bucket]
+    
     def __init__(self):
         self.state_cache = {}  # 缓存状态计算结果
         self.reward_cache = {}  # 缓存奖励计算结果
@@ -224,6 +275,7 @@ class PerformanceOptimizer:
         self.cache_misses = 0
         self.last_cleanup = 0
         self.last_frame_count = 0  # 记录上次更新的实际帧数
+        self._init_reward_lut()  # 初始化奖励LUT
 
     def _cleanup_cache(self):
         """定期清理过期缓存，防止内存泄漏 - 优化版，原地删除"""
@@ -387,30 +439,16 @@ class PerformanceOptimizer:
         if took_damage:
             reward -= 3.0
 
-        # 距离奖励
+        # 距离奖励 - 使用LUT查表替代if-elif链
         role = roles.get(enemy, 'suppressor')
-
-        if role == 'aggressor':
-            if distance_to_target < 80:
-                reward += 2.0
-            elif distance_to_target < 150:
-                reward += 1.0
-            elif distance_to_target > 300:
-                reward -= 0.5
-        elif role == 'flanker':
-            if 120 < distance_to_target < 250:
-                reward += 1.5
-                dx = abs(enemy_x - target_x)
-                dy = abs(enemy_y - target_y)
-                if abs(dx - dy) < 50:
-                    reward += 0.5
-            elif distance_to_target > 350:
-                reward -= 0.3
-        else:  # suppressor
-            if 200 < distance_to_target < 350:
-                reward += 1.0
-            elif distance_to_target < 100:
-                reward -= 0.5
+        reward += self._get_distance_reward(distance_to_target, role)
+        
+        # flanker额外奖励：保持45度角
+        if role == 'flanker':
+            dx = abs(enemy_x - target_x)
+            dy = abs(enemy_y - target_y)
+            if abs(dx - dy) < 50:
+                reward += 0.5
 
         # 视野奖励
         has_line_of_sight = True
@@ -517,11 +555,12 @@ class QLearningAgent:
 
     def __init__(self):
         """初始化Q学习代理"""
-        self.q_table = {}
+        # 使用defaultdict自动初始化新状态为[0.0, 0.0, 0.0, 0.0]
+        self.q_table = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
         self.q_table_access_order = deque()  # 记录访问顺序，用于LRU
         self.max_q_table_size = 5000  # 限制Q-table最大大小
         self._recorded_states = set()  # 辅助LRU去重
-        
+
         self.exploration_rate = EXPLORATION_RATE
         self.learning_rate = LEARNING_RATE
         self.discount_factor = DISCOUNT_FACTOR
@@ -582,24 +621,37 @@ class QLearningAgent:
             return self.get_best_action(state)
 
     def get_best_action(self, state):
-        """获取当前状态下Q值最大的动作"""
-        if state not in self.q_table:
-            self.q_table[state] = [0.0, 0.0, 0.0, 0.0]
-
+        """
+        获取当前状态下Q值最大的动作
+        优化版：使用defaultdict自动初始化，单次遍历找最大
+        """
+        values = self.q_table[state]  # defaultdict自动初始化新状态
         self._record_access(state)
         self._enforce_q_table_limit()
 
-        return self.q_table[state].index(max(self.q_table[state]))
+        # 优化：单次遍历同时找最大值和索引，避免.index()的O(n)搜索
+        max_idx = 0
+        max_val = values[0]
+        for i in range(1, 4):
+            if values[i] > max_val:
+                max_val = values[i]
+                max_idx = i
+        return max_idx
 
     def update_q_value(self, state, action, reward, next_state):
-        """Q-learning更新公式"""
-        if state not in self.q_table:
-            self.q_table[state] = [0.0, 0.0, 0.0, 0.0]
-        if next_state not in self.q_table:
-            self.q_table[next_state] = [0.0, 0.0, 0.0, 0.0]
-
+        """
+        Q-learning更新公式
+        优化版：使用defaultdict自动初始化，无需显式检查
+        """
+        # defaultdict自动初始化新状态，无需显式检查
         old_value = self.q_table[state][action]
-        next_max = max(self.q_table[next_state])
+        next_values = self.q_table[next_state]
+
+        # 使用优化后的max查找（只有4个元素，手动展开比max()更快）
+        next_max = next_values[0]
+        for i in range(1, 4):
+            if next_values[i] > next_max:
+                next_max = next_values[i]
 
         new_value = old_value + self.learning_rate * (
             reward + self.discount_factor * next_max - old_value
@@ -611,16 +663,20 @@ class QLearningAgent:
         self._enforce_q_table_limit()
 
     def add_experience(self, state, action, reward, next_state):
-        """添加经验到优先级回放缓冲区"""
-        # 计算TD误差作为优先级
-        if state not in self.q_table:
-            self.q_table[state] = [0.0, 0.0, 0.0, 0.0]
-        if next_state not in self.q_table:
-            self.q_table[next_state] = [0.0, 0.0, 0.0, 0.0]
-
-        # 计算TD误差
+        """
+        添加经验到优先级回放缓冲区
+        优化版：使用defaultdict自动初始化
+        """
+        # defaultdict自动初始化新状态
         old_value = self.q_table[state][action]
-        next_max = max(self.q_table[next_state])
+        next_values = self.q_table[next_state]
+
+        # 使用优化后的max查找
+        next_max = next_values[0]
+        for i in range(1, 4):
+            if next_values[i] > next_max:
+                next_max = next_values[i]
+
         td_error = abs(reward + self.discount_factor * next_max - old_value)
 
         # 使用TD误差作为优先级
@@ -628,7 +684,10 @@ class QLearningAgent:
         self.replay_buffer.add((state, action, reward, next_state), priority)
 
     def replay_experience(self):
-        """从优先级回放缓冲区学习"""
+        """
+        从优先级回放缓冲区学习
+        优化版：使用defaultdict自动初始化
+        """
         if len(self.replay_buffer) < BATCH_SIZE:
             return
 
@@ -638,14 +697,15 @@ class QLearningAgent:
         # 学习并更新优先级
         new_priorities = []
         for i, (state, action, reward, next_state) in enumerate(batch):
-            # 重新计算TD误差
-            if state not in self.q_table:
-                self.q_table[state] = [0.0, 0.0, 0.0, 0.0]
-            if next_state not in self.q_table:
-                self.q_table[next_state] = [0.0, 0.0, 0.0, 0.0]
-
+            # defaultdict自动初始化新状态
             old_value = self.q_table[state][action]
-            next_max = max(self.q_table[next_state])
+            next_values = self.q_table[next_state]
+
+            # 使用优化后的max查找
+            next_max = next_values[0]
+            for j in range(1, 4):
+                if next_values[j] > next_max:
+                    next_max = next_values[j]
 
             # 使用重要性采样权重更新
             td_target = reward + self.discount_factor * next_max
@@ -690,11 +750,21 @@ class QLearningAgent:
             logging.error(f"Failed to save Q-table: {e}")
 
     def load_q_table(self):
+        """
+        加载Q表
+        优化版：将加载的dict转换为defaultdict
+        """
         try:
             with open('q_table.pkl', 'rb') as f:
-                self.q_table = pickle.load(f)
+                loaded = pickle.load(f)
+                # 转换为defaultdict，自动初始化新状态
+                if isinstance(loaded, dict):
+                    self.q_table = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0], loaded)
+                else:
+                    self.q_table = loaded
         except (IOError, OSError, pickle.UnpicklingError):
-            self.q_table = {}
+            # 保持已有的defaultdict
+            pass
 
     def assign_roles(self, enemies, target):
         """
