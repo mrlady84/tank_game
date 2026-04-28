@@ -5,22 +5,12 @@
 功能:
 - Pygame游戏循环和渲染
 - 坦克物理和碰撞检测
-- AI决策线程管理
 - 游戏状态控制（玩家/老鹰/游戏结束）
 
 架构:
 - 固定时间步长物理更新(60 FPS)
-- 异步AI决策(ThreadSafeAIDecider)
 - 分离逻辑(update_physics)和渲染(render_game)
 
-游戏规则:
-- 玩家AI控制2辆坦克（黄色/蓝色），速度2.0
-- 敌方AI控制最多5辆坦克，速度1.0，使用HybridAgent（Q-learning + 遗传算法）
-- 基地为老鹰+3面砖墙保护，老鹰被击中立即重开
-- 砖墙可被子弹摧毁，钢墙不可摧毁
-
-作者: Tank Battle AI Team
-版本: 2.0
 """
 
 import os
@@ -30,9 +20,7 @@ import math
 import time
 import sys
 import logging
-import threading
 import gc
-from queue import Queue, Empty
 
 # 优化GC：降低频次，减少卡顿
 gc.disable()  # 禁用自动GC
@@ -130,12 +118,6 @@ try:
 
     # 创建黄色和蓝色的玩家坦克图像
     # 使用LRU缓存避免重复计算相同的着色
-    from functools import lru_cache
-    
-    def _tint_image_key(surface, target_color):
-        """生成缓存键 - 使用surface的id和颜色"""
-        return (id(surface), target_color)
-    
     _tint_cache = {}
     
     def tint_image(surface, target_color):
@@ -311,27 +293,6 @@ class Tank:
             y = self.y + TILE_SIZE // 2 - 3
         return Bullet(x, y, self.direction, self.team, owner_tank=self)
 
-    def try_fire(self, target, current_time, walls):
-        if not self.can_shoot(current_time):
-            return None
-
-        # Set direction based on target position
-        if self.rect.x == target.rect.x:
-            self.direction = 0 if self.rect.y > target.rect.y else 2
-        elif self.rect.y == target.rect.y:
-            self.direction = 3 if self.rect.x > target.rect.x else 1
-        else:
-            # Random direction change with small probability
-            if random.random() < 0.08:
-                self.direction = random.choice([0, 1, 2, 3])
-                return self.shoot(current_time)
-
-        # Check if we have a clear line of sight
-        if has_clear_line(self.rect, target.rect, walls):
-            return self.shoot(current_time)
-
-        return None
-
 class Bullet:
     def __init__(self, x, y, direction, owner, owner_tank=None):
         self.direction = direction
@@ -395,15 +356,6 @@ def get_tiles_rects():
             elif tile == BASE_TILE:
                 base_tiles.append(rect)
     return brick_tiles, steel_tiles, grass_tiles, base_tiles
-
-
-def draw_map():
-    for row_index, row in enumerate(LEVEL_MAP):
-        for col_index, tile in enumerate(row):
-            x = col_index * TILE_SIZE
-            y = row_index * TILE_SIZE
-            if tile in TILE_IMAGES:
-                screen.blit(TILE_IMAGES[tile], (x, y))
 
 
 def can_move_rect(rect, dx, dy, walls):
@@ -622,180 +574,9 @@ def reset_game(global_hybrid_agents=None):
     return players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, wall_rects, enemy_timer, player_ais, enemy_ais, global_hybrid_agents
 
 
-class ThreadSafeAIDecider:
-    """线程安全的 AI 决策器"""
-    def __init__(self):
-        self.decision_queue = Queue()  # 待处理决策请求
-        self.result_queue = Queue()    # 决策结果
-        self.worker_thread = None
-        self.running = False
-        self.last_decisions = {}  # tank_id -> (direction, target_rect)
-        self.decision_count = 0  # 用于定期清理
-
-    def start(self):
-        """启动 AI 决策线程"""
-        self.running = True
-        self.worker_thread = threading.Thread(target=self._ai_worker, daemon=True)
-        self.worker_thread.start()
-
-    def stop(self):
-        """停止 AI 决策线程"""
-        self.running = False
-        if self.worker_thread:
-            self.worker_thread.join(timeout=2.0)
-        
-    def reset(self):
-        """重置状态（游戏重启时调用）"""
-        # 清空队列
-        while not self.decision_queue.empty():
-            try:
-                self.decision_queue.get_nowait()
-            except Empty:
-                break
-        while not self.result_queue.empty():
-            try:
-                self.result_queue.get_nowait()
-            except Empty:
-                break
-        # 清空缓存
-        self.last_decisions.clear()
-        self.decision_count = 0
-
-    def submit_decision(self, tank_id, tank, target, walls, all_tanks, roles, q_agent_instance):
-        """提交 AI 决策请求（非阻塞）"""
-        # 更严格的队列限制
-        if self.decision_queue.qsize() < 2:
-            self.decision_count += 1
-            # 更频繁地清理过期结果
-            if self.decision_count % 30 == 0:
-                self._cleanup_old_results()
-            
-            # 只传递必要的数据，避免内存泄漏
-            self.decision_queue.put({
-                'tank_id': tank_id,
-                'tank_rect': tank.rect.copy(),
-                'tank_direction': tank.direction,
-                'tank_speed': tank.speed,
-                'tank_move_counter': tank.move_counter,
-                'tank_max_moves': tank.max_consecutive_moves,
-                'target_rect': target.rect.copy() if target else None,
-                'walls': [w.copy() for w in walls[:15]],  # 进一步减少墙壁数量
-                'all_tanks_rects': [t.rect.copy() for t in all_tanks[:6]],  # 只传递前6个坦克的rect
-            })
-
-    def _cleanup_old_results(self):
-        """清理过期的决策结果"""
-        current_time = time.time()
-        # 更激进的清理：只保留1秒内的结果
-        expired = [tid for tid, data in self.last_decisions.items() 
-                  if current_time - data.get('timestamp', 0) > 1.0]
-        for tid in expired:
-            del self.last_decisions[tid]
-        
-        # 限制字典大小
-        if len(self.last_decisions) > 20:
-            # 保留最近的20个
-            sorted_items = sorted(self.last_decisions.items(), 
-                                key=lambda x: x[1].get('timestamp', 0), 
-                                reverse=True)
-            self.last_decisions = dict(sorted_items[:20])
-
-    def get_result(self, tank_id):
-        """获取决策结果（非阻塞）"""
-        try:
-            while not self.result_queue.empty():
-                result = self.result_queue.get_nowait()
-                self.last_decisions[result['tank_id']] = result
-        except Empty:
-            pass
-        return self.last_decisions.get(tank_id, None)
-
-    def _ai_worker(self):
-        """AI 决策工作线程"""
-        while self.running:
-            try:
-                # 从队列获取决策请求（带超时）
-                request = self.decision_queue.get(timeout=0.1)
-                
-                # 在后台线程中执行 AI 计算
-                direction = self._compute_direction(request)
-                
-                # 将结果放回结果队列
-                self.result_queue.put({
-                    'tank_id': request['tank_id'],
-                    'direction': direction,
-                    'timestamp': time.time()
-                })
-                
-                self.decision_queue.task_done()
-            except Empty:
-                continue
-            except Exception as e:
-                logging.error(f"AI worker error: {e}")
-                
-    def _compute_direction(self, request):
-        """计算 AI 决策方向"""
-        try:
-            # 创建临时的简化对象，避免传递整个 tank
-            class TempTank:
-                def __init__(self, rect, direction, move_counter, max_moves, speed):
-                    self.rect = rect
-                    self.direction = direction
-                    self.move_counter = move_counter
-                    self.max_consecutive_moves = max_moves
-                    self.speed = speed
-                    
-            temp_tank = TempTank(
-                request['tank_rect'],
-                request['tank_direction'],
-                request['tank_move_counter'],
-                request['tank_max_moves'],
-                request['tank_speed']
-            )
-            
-            # 构建临时敌人列表
-            temp_enemies = [t for t in request['all_tanks_rects']]
-            
-            # 调用简化的决策逻辑（不依赖完整的 AI 系统）
-            return self._simple_decision(temp_tank, request['target_rect'], request['walls'], temp_enemies)
-        except Exception as e:
-            logging.error(f"Error computing AI direction: {e}")
-            return request['tank_direction']
-
-    def _simple_decision(self, tank, target_rect, walls, all_tanks_rects):
-        """简化的决策逻辑（在后台线程中执行）"""
-        # 简单的避障逻辑
-        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 上右下左
-        for i, (dx, dy) in enumerate(directions):
-            new_rect = tank.rect.move(dx * tank.speed, dy * tank.speed)
-            # 检查是否在边界内
-            from config.game_config import TILE_SIZE, SCREEN_COLS, SCREEN_ROWS
-            playfield_rect = pygame.Rect(0, 0, TILE_SIZE * SCREEN_COLS, TILE_SIZE * SCREEN_ROWS)
-            if not playfield_rect.contains(new_rect):
-                continue
-            # 检查墙壁碰撞
-            collision = False
-            for wall in walls:
-                if new_rect.colliderect(wall):
-                    collision = True
-                    break
-            if collision:
-                continue
-            # 检查坦克碰撞
-            for other_rect in all_tanks_rects:
-                if other_rect != tank.rect and new_rect.colliderect(other_rect):
-                    collision = True
-                    break
-            if not collision:
-                return i
-        
-        # 如果所有方向都有碰撞，随机选择一个
-        return random.randint(0, 3)
-
-
 def update_physics(players, enemies, bullets, explosions, wall_rects,
                    brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                   current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, ai_learning_enabled, ai_decider, player_ais, enemy_ais, global_hybrid_agents):
+                   current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, ai_learning_enabled, player_ais, enemy_ais, global_hybrid_agents):
     """
     执行固定时间步长的物理模拟更新
     
@@ -833,7 +614,6 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
         enemy_ai_timer: 敌方AI决策计时器
         enemy_roles_cache: 敌方角色缓存
         ai_learning_enabled: 是否启用AI学习
-        ai_decider: 线程安全AI决策器
         player_ais: 玩家AI控制器映射 {Tank: AutoAI}
         enemy_ais: 敌方AI控制器映射 {Tank: HybridAgent}
     
@@ -1178,13 +958,6 @@ def main():
     enemy_roles_cache = {}  # 缓存角色分配结果
     ai_learning_enabled = False  # 默认关闭学习模式，提升性能
 
-    # 初始化线程化 AI 决策器
-    ai_decider = ThreadSafeAIDecider()
-    ai_decider.start()
-    
-    # 游戏重启时也重置 AI 决策器
-    ai_decider.reset()
-
     # Game statistics
     game_start_time = pygame.time.get_ticks()
     enemies_killed = 0
@@ -1227,7 +1000,7 @@ def main():
                 game_state, score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache = update_physics(
                     players, enemies, bullets, explosions, wall_rects,
                     brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                    current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, ai_learning_enabled, ai_decider, player_ais, enemy_ais, global_hybrid_agents
+                    current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, ai_learning_enabled, player_ais, enemy_ais, global_hybrid_agents
                 )
                 accumulator -= physics_step
                 update_count += 1
@@ -1260,9 +1033,6 @@ def main():
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
 
-                    # 重置 AI 决策器
-                    ai_decider.reset()
-
                     # 手动触发GC，清理内存碎片
                     gc.collect()
 
@@ -1293,10 +1063,7 @@ def main():
                 for agent in global_hybrid_agents:
                     agent.evolve_before_new_game(game_stats)
 
-                # 重置 AI 决策器
-                ai_decider.reset()
-
-                # 手动触发GC，清理内存碎片
+                    # 手动触发GC，清理内存碎片
                 gc.collect()
 
                 players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, wall_rects, enemy_timer, player_ais, enemy_ais, global_hybrid_agents = reset_game(global_hybrid_agents)
@@ -1348,12 +1115,8 @@ def main():
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
 
-                    # 重置 AI 决策器
-                    ai_decider.reset()
-
                     # 手动触发GC，清理内存碎片
                     gc.collect()
-
                     players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, wall_rects, enemy_timer, player_ais, enemy_ais, global_hybrid_agents = reset_game(global_hybrid_agents)
                     game_state = 'playing'
                     game_start_time = pygame.time.get_ticks()
@@ -1370,14 +1133,12 @@ def main():
 
             clock.tick(60)
     finally:
-        # 停止 AI 线程
-        ai_decider.stop()
-
         # 显示训练进度
         logging.info(f"\n=== 游戏完成 ===")
         logging.info(f"总游戏局数: {total_games + 1}")
         
         pygame.quit()
+
 
 if __name__ == "__main__":
     main()

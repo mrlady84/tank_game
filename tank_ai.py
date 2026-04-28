@@ -295,11 +295,6 @@ class PerformanceOptimizer:
         for k in expired_reward_keys:
             del self.reward_cache[k]
 
-    def increment_frame(self):
-        """增加帧计数，应在每帧物理更新时调用"""
-        self.frame_count += 1
-        self._cleanup_cache()
-
     def get_cached_state(self, enemy, target, walls, all_enemies, force_update=False):
         """获取缓存的状态，如果不存在则计算 - 优化键设计"""
         # 使用当前的帧组合作为缓存键
@@ -608,10 +603,6 @@ class QLearningAgent:
         现在使用缓存优化性能
         """
         return performance_optimizer.get_cached_state(enemy, target, walls, all_enemies)
-
-    def _is_between(self, val, a, b):
-        """检查值是否在两个边界之间"""
-        return min(a, b) <= val <= max(a, b)
 
     def get_action(self, state):
         """ε-贪心策略选择动作"""
@@ -1439,12 +1430,6 @@ class PerformanceMonitor:
         }
 
         return report
-
-    def reset_metrics(self):
-        """重置所有指标"""
-        for key in self.metrics:
-            self.metrics[key].clear()
-        self.performance_log.clear()
 
 
 # 全局性能监控实例

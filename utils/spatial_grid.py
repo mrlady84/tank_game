@@ -116,27 +116,6 @@ class SpatialGrid:
         
         return list(result)
     
-    def query_nearby(self, x, y, radius=1):
-        """
-        查询某坐标周围指定半径内的所有对象
-        
-        Args:
-            x, y: 中心坐标
-            radius: 网格单元半径，默认为1（3x3区域）
-            
-        Returns:
-            list: 附近对象的列表
-        """
-        center_cell = self._get_cell_coords(x, y)
-        result = set()
-        
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                cell = (center_cell[0] + dx, center_cell[1] + dy)
-                result.update(self.grid[cell])
-        
-        return list(result)
-    
     def clear(self):
         """清空整个网格"""
         self.grid.clear()
