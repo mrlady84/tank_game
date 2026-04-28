@@ -733,13 +733,6 @@ class QLearningAgent:
         # 经验回放
         self.replay_experience()
 
-    def save_q_table(self):
-        try:
-            with open('q_table.pkl', 'wb') as f:
-                pickle.dump(self.q_table, f)
-        except (IOError, OSError, pickle.PickleError) as e:
-            logging.error(f"Failed to save Q-table: {e}")
-
     def load_q_table(self):
         """
         加载Q表
@@ -833,115 +826,10 @@ class QLearningAgent:
         )
 
 
-def choose_enemy_direction(enemy, target, walls, all_enemies=None, roles=None, q_agent_instance=None):
-    """
-    改进的敌人方向选择
-    集成真正的战术包抄逻辑
-    """
-    if all_enemies is None:
-        all_enemies = []
-    if roles is None:
-        roles = {}
-    if q_agent_instance is None:
-        return enemy.direction  # 保底返回当前方向
-
-    # 如果移动步数过多，强制改变方向
-    if enemy.move_counter >= enemy.max_consecutive_moves:
-        enemy.move_counter = 0
-        return _get_random_valid_direction(enemy, walls)
-
-    # 使用Q-learning决策
-    current_state = q_agent_instance.get_state(enemy, target, walls, all_enemies)
-    action = q_agent_instance.get_action(current_state)
-
-    # 记录状态和动作
-    enemy.last_state = current_state
-    enemy.last_action = action
-
-    # 转换为方向
-    directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 上、右、下、左
-    ddx, ddy = directions[action]
-
-    # 如果Q-learning建议的方向可行，直接执行
-    if can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, walls):
-        return action
-    else:
-        # 回退到基于角色的智能逻辑
-        return _role_based_movement(enemy, target, walls, roles)
-
-
-def _get_random_valid_direction(enemy, walls):
-    """获取一个随机可行的方向"""
-    directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
-    random.shuffle(directions)
-    for i, (ddx, ddy) in enumerate(directions):
-        if can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, walls):
-            return i
-    return enemy.direction
-
-
-def _role_based_movement(enemy, target, walls, roles):
-    """基于角色的战术移动"""
-    role = roles.get(enemy, 'suppressor')
-    target_x = target.rect.centerx
-    target_y = target.rect.centery
-    enemy_x = enemy.rect.centerx
-    enemy_y = enemy.rect.centery
-
-    dx = target_x - enemy_x
-    dy = target_y - enemy_y
-
-    # 根据角色调整目标点
-    if role == 'flanker':
-        # 真正的战术包抄：计算侧翼位置
-        distance = math.hypot(dx, dy)
-        if distance > 0:
-            # 计算垂直于玩家方向的侧翼点
-            perp_x = -dy / distance * 100  # 垂直方向偏移100像素
-            perp_y = dx / distance * 100
-            # 选择较近的一侧
-            if abs(enemy_x + perp_x - target_x) < abs(enemy_x - perp_x - target_x):
-                target_x = enemy_x + perp_x
-                target_y = enemy_y + perp_y
-            else:
-                target_x = enemy_x - perp_x
-                target_y = enemy_y - perp_y
-    elif role == 'suppressor':
-        # 压制者：保持在中等距离
-        distance = math.hypot(dx, dy)
-        if distance < 150:
-            # 太近了，后退
-            target_x = enemy_x - dx * 0.5
-            target_y = enemy_y - dy * 0.5
-        elif distance > 300:
-            # 太远了，接近
-            pass  # 保持当前目标
-        else:
-            # 适中距离，尝试封锁路径
-            pass
-
-    # 计算最佳方向
-    dx = target_x - enemy_x
-    dy = target_y - enemy_y
-    
-    directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
-    direction_scores = []
-
-    for i, (ddx, ddy) in enumerate(directions):
-        # 这个方向减少多少距离
-        distance_reduction = ddx * dx + ddy * dy
-        # 是否可行
-        can_move = can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, walls)
-        direction_scores.append((distance_reduction, can_move, i))
-
-    # 排序：优先可行方向，然后按距离减少量
-    direction_scores.sort(key=lambda x: (-x[1], -x[0]))
-
-    for _, can_move, direction_index in direction_scores:
-        if can_move:
-            return direction_index
-
-    return enemy.direction
+# 旧版AI函数已删除：
+# - choose_enemy_direction: 已被main.py中的内联逻辑替代
+# - _get_random_valid_direction: 已被替代
+# - _role_based_movement: 保留作为未来AI优化储备（见下方）
 
 
 class GeneticOptimizer:
@@ -966,18 +854,38 @@ class GeneticOptimizer:
             self.population.append(individual)
 
     def evaluate_fitness(self, individual, game_stats):
-        """评估适应度"""
-        survival_time = game_stats.get('survival_time', 0)
-        enemies_killed = game_stats.get('enemies_killed', 0)
-        player_damage = game_stats.get('player_damage', 0)
-        team_coordination = game_stats.get('team_coordination', 0)
+        """
+        评估适应度 - 从HybridAgent（敌方AI）视角评估表现
+        
+        适应度函数设计原则：
+        - HybridAgent获胜是最高优先级（hybrid_wins * 100）
+        - 击杀玩家次之（player_killed * 50）
+        - 造成伤害和击杀敌人作为辅助指标
+        - 存活时间和团队协调作为低优先级指标
+        
+        Args:
+            individual: 遗传算法个体
+            game_stats: 游戏统计数据（从HybridAgent视角收集）
+            
+        Returns:
+            float: 适应度分数，越高表示HybridAgent表现越好
+        """
+        # HybridAgent视角数据
+        hybrid_wins = game_stats.get('hybrid_wins', 0)      # HybridAgent是否获胜
+        player_killed = game_stats.get('player_killed', 0)  # HybridAgent是否击杀玩家
+        damage_inflicted = game_stats.get('damage_inflicted', 0)  # HybridAgent造成的伤害
+        hybrid_kills = game_stats.get('hybrid_kills', 0)    # HybridAgent击杀数
+        survival_time = game_stats.get('survival_time', 0)  # 游戏存活时间
+        team_coordination = game_stats.get('team_coordination', 0)  # 团队协调分数
 
-        # 多目标适应度函数
+        # 从HybridAgent视角评估适应度 - HybridAgent获胜是最高优先级
         fitness = (
-            survival_time * 0.2 +
-            enemies_killed * 8 -
-            player_damage * 1.5 +
-            team_coordination * 3
+            hybrid_wins * 100.0 +      # HybridAgent获胜：最高奖励
+            player_killed * 50.0 +     # 击杀玩家：高奖励
+            damage_inflicted * 0.5 +   # 造成伤害：中等奖励
+            hybrid_kills * 5.0 +       # 击杀敌人：低奖励
+            survival_time * 0.1 +      # 存活时间：低奖励
+            team_coordination * 0.5    # 团队协调：低奖励
         )
 
         individual['fitness'] = fitness
@@ -1283,8 +1191,7 @@ class HybridAgent:
             killed_player=killed_player, took_damage=took_damage
         )
 
-    def save_q_table(self):
-        self.q_agent.save_q_table()
+    # save_q_table 已删除：已被save_checkpoint完全替代
 
 
 # 全局混合智能代理实例

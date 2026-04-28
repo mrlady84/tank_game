@@ -126,6 +126,20 @@ AutoAI 是专为玩家坦克设计的目标锁定 + 自动寻路击杀算法。
 记录经验 → 优先级回放 → 遗传进化（每10局）
 ```
 
+**适应度函数设计（HybridAgent视角）**:
+```python
+fitness = (
+    hybrid_wins * 100.0 +      # HybridAgent获胜：最高优先级
+    player_killed * 50.0 +     # 击杀玩家：高优先级
+    damage_inflicted * 0.5 +   # 造成伤害：中等奖励
+    hybrid_kills * 5.0 +       # 击杀敌人：低奖励
+    survival_time * 0.1 +      # 存活时间：低奖励
+    team_coordination * 0.5    # 团队协调：低奖励
+)
+```
+
+**核心原则**: 适应度函数从HybridAgent自身视角评估表现，而非玩家视角。这确保遗传算法优化的参数让HybridAgent变强，而非变弱。
+
 ### HybridAgent 架构图
 
 ```
@@ -199,7 +213,8 @@ AutoAI 是专为玩家坦克设计的目标锁定 + 自动寻路击杀算法。
 2. **动作选择** → ε-贪心：探索（随机）vs 利用（最大Q值）
 3. **经验存储** → (s, a, r, s') 存入优先级回放缓冲区
 4. **Q值更新** → `Q(s,a) ← Q(s,a) + α[r + γ·max_a'Q(s',a') - Q(s,a)]`
-5. **遗传进化** → 每10局进化超参数 (α, γ, ε)
+5. **游戏结束** → 从HybridAgent视角收集统计数据（获胜、击杀、伤害）
+6. **遗传进化** → 每10局使用适应度函数进化超参数 (α, γ, ε)
 
 ## 📊 性能优化
 
@@ -288,6 +303,13 @@ AutoAI 是专为玩家坦克设计的目标锁定 + 自动寻路击杀算法。
 - ✅ **代码重复**: 提取几何函数到工具模块
 - ✅ **缓存键设计**: 移除 `id(enemy)` 使用
 
+### 关键Bug修复 (2026-04-28)
+- ✅ **适应度函数评估错误**: 从玩家视角改为HybridAgent视角
+  - 旧公式: `fitness = survival_time * 0.2 + enemies_killed * 8 - player_damage * 1.5`
+  - 新公式: `fitness = hybrid_wins * 100 + player_killed * 50 + damage_inflicted * 0.5`
+- ✅ **游戏统计收集**: 添加HybridAgent视角数据（hybrid_wins, player_killed, damage_inflicted）
+- ✅ **注释清理**: 移除表情符号标记，提升代码可读性
+
 详见 [BUGFIX_SUMMARY.md](doc/BUGFIX_SUMMARY.md)
 
 ## 🔧 配置
@@ -348,11 +370,17 @@ MIT License
 ---
 
 **作者**: Tank Battle AI Team
-**版本**: v3.0
-**最后更新**: 2026-04-20
+**版本**: v3.1
+**最后更新**: 2026-04-28
 **代码状态**: ✅ 生产就绪（所有Bug已修复）
 
 ## 📋 更新记录
+
+### v3.1 (2026-04-28) - 适应度函数修复
+- ✅ **修复适应度函数**: 从玩家视角改为HybridAgent视角评估
+- ✅ **添加HybridAgent统计**: hybrid_wins, player_killed, damage_inflicted 到 game_stats
+- ✅ **更新文档**: 澄清AI进化机制和适应度函数设计
+- ✅ **清理注释**: 移除表情符号标记，提升代码可读性
 
 ### v3.0 (2026-04-20) - 重大更新
 - ✅ 添加直线射击奖励机制

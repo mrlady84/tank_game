@@ -48,7 +48,7 @@ except ModuleNotFoundError:
     psutil = None
     PSUTIL_AVAILABLE = False
 
-from tank_ai import q_agent, choose_enemy_direction, can_move_rect, performance_monitor, HybridAgent, AutoAI, has_clear_line
+from tank_ai import q_agent, can_move_rect, performance_monitor, HybridAgent, AutoAI, has_clear_line
 from config.game_config import *
 
 if not PSUTIL_AVAILABLE:
@@ -1020,16 +1020,19 @@ def main():
                     game_end_time = pygame.time.get_ticks()
                     survival_time = (game_end_time - game_start_time) / 1000.0
 
+                    # 收集本局数据并传给 AI 激活遗传算法进化
+                    # 使用全局 HybridAgent 实例，即使 enemy_ais 被清空也不会丢失数据
                     game_stats = {
                         'survival_time': survival_time,
                         'enemies_killed': enemies_killed,
                         'player_damage': player_damage_taken,
-                        'team_coordination': team_coordination_score
+                        'team_coordination': team_coordination_score,
+                        # HybridAgent视角数据：玩家胜利说明HybridAgent失败
+                        'hybrid_wins': 0,  # HybridAgent失败标记
+                        'hybrid_kills': enemies_killed,  # HybridAgent击杀数（等于玩家击杀数）
+                        'player_killed': 0,  # 玩家还活着
+                        'damage_inflicted': 0  # HybridAgent造成的伤害（玩家未受伤）
                     }
-
-                    # ✅ 收集本局数据并传给 AI，激活遗传算法
-                    # ⚠️ 现在使用全局 HybridAgent 实例，即使 enemy_ais 被清空也不会丢失数据
-                    # ✅ 使用 evolve_before_new_game() 替代 record_game_stats()，包含探索率衰减和渐进式进化
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
 
@@ -1052,13 +1055,18 @@ def main():
                 logging.info(f"🦅 老鹰阵亡！立即重新开始第 {total_games + 1} 局")
                 enemy_wins += 1  # 敌方胜利
 
-                # ✅ 收集本局数据并传给 AI，激活遗传算法
+                # 收集本局数据并传给 AI 激活遗传算法进化
                 survival_time = (current_time - game_start_time) / 1000.0
                 game_stats = {
                     'survival_time': survival_time,
                     'enemies_killed': 0,
                     'player_damage': player_damage_taken,
-                    'team_coordination': 0
+                    'team_coordination': 0,
+                    # HybridAgent视角数据：老鹰被摧毁说明HybridAgent获胜
+                    'hybrid_wins': 1,
+                    'hybrid_kills': 0,
+                    'player_killed': 1,  # HybridAgent击杀了玩家（摧毁老鹰）
+                    'damage_inflicted': player_damage_taken
                 }
                 for agent in global_hybrid_agents:
                     agent.evolve_before_new_game(game_stats)
@@ -1103,15 +1111,18 @@ def main():
                         ) / max(1, len(enemies))
                         team_coordination_score = max(0, 300 - avg_distance)
                     
+                    # 收集本局数据并传给 AI 激活遗传算法进化
                     game_stats = {
                         'survival_time': survival_time,
                         'enemies_killed': enemies_killed,
                         'player_damage': player_damage_taken,
-                        'team_coordination': team_coordination_score
+                        'team_coordination': team_coordination_score,
+                        # HybridAgent视角数据：玩家全灭说明HybridAgent获胜
+                        'hybrid_wins': 1,
+                        'hybrid_kills': enemies_killed,
+                        'player_killed': 1,  # HybridAgent击杀了所有玩家
+                        'damage_inflicted': player_damage_taken
                     }
-
-                    # ✅ 收集本局数据并传给 AI，激活遗传算法
-                    # ✅ 使用 evolve_before_new_game() 替代 record_game_stats()，包含探索率衰减和渐进式进化
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
 

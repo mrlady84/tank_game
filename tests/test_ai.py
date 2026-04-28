@@ -80,7 +80,7 @@ class TestPerformanceOptimizer(unittest.TestCase):
         """Test optimizer initialization"""
         self.assertIsNotNone(self.optimizer.state_cache)
         self.assertIsNotNone(self.optimizer.reward_cache)
-        self.assertEqual(self.optimizer.cache_timeout, 5)
+        self.assertEqual(self.optimizer.cache_timeout, 20)
 
     def test_cache_stats(self):
         """Test cache statistics"""

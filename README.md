@@ -32,6 +32,7 @@ A smart tank battle game powered by **Q-learning** and **Genetic Algorithms**.
   - **Stage 2 (Games 4-9)**: Light evolution (elite preservation, low-intensity mutation)
   - **Stage 3 (Games 10+)**: Full genetic algorithm evolution
   - Exploration rate decays 5% per game
+  - **Fitness Function**: HybridAgent-perspective evaluation (wins, kills, damage dealt)
 
 - **Global AI Instance**:
   - Single `HybridAgent` instance shared by all enemy tanks
@@ -144,6 +145,20 @@ Observe State → ε-greedy Action Selection → Execute → Get Reward → Upda
 Record Experience → Prioritized Replay → Genetic Evolution (every 10 games)
 ```
 
+**Fitness Function Design (HybridAgent Perspective)**:
+```python
+fitness = (
+    hybrid_wins * 100.0 +      # HybridAgent wins: highest priority
+    player_killed * 50.0 +     # Kill player: high priority
+    damage_inflicted * 0.5 +   # Deal damage: medium priority
+    hybrid_kills * 5.0 +       # Kill enemies: low priority
+    survival_time * 0.1 +      # Survival time: low priority
+    team_coordination * 0.5    # Team coordination: low priority
+)
+```
+
+**Key Principle**: The fitness function evaluates HybridAgent's performance from its own perspective, not the player's. This ensures the genetic algorithm optimizes parameters that make HybridAgent stronger, not weaker.
+
 ### HybridAgent Architecture Diagram
 
 ```
@@ -217,7 +232,8 @@ Record Experience → Prioritized Replay → Genetic Evolution (every 10 games)
 2. **Action Selection** → ε-greedy: explore (random) vs exploit (max Q-value)
 3. **Experience Storage** → (s, a, r, s') stored in prioritized replay buffer
 4. **Q-Value Update** → `Q(s,a) ← Q(s,a) + α[r + γ·max_a'Q(s',a') - Q(s,a)]`
-5. **Genetic Evolution** → Every 10 games, evolve hyperparameters (α, γ, ε)
+5. **Game End** → Collect stats from HybridAgent perspective (wins, kills, damage)
+6. **Genetic Evolution** → Every 10 games, evolve hyperparameters (α, γ, ε) using fitness function
 
 ## 📊 Performance Optimization
 
@@ -326,6 +342,13 @@ python -m pytest tests/test_performance.py
 - ✅ **Code Duplication**: Extracted geometry functions to utility module
 - ✅ **Cache Key Design**: Removed `id(enemy)` usage
 
+### Critical Bugs Fixed (2026-04-28)
+- ✅ **Fitness Function Evaluation Error**: Changed from player-perspective to HybridAgent-perspective
+  - Old: `fitness = survival_time * 0.2 + enemies_killed * 8 - player_damage * 1.5`
+  - New: `fitness = hybrid_wins * 100 + player_killed * 50 + damage_inflicted * 0.5`
+- ✅ **Game Stats Collection**: Added HybridAgent perspective data (hybrid_wins, player_killed, damage_inflicted)
+- ✅ **Dead Code Removal**: Removed unused functions (choose_enemy_direction, save_q_table, etc.)
+
 See [BUGFIX_SUMMARY.md](doc/BUGFIX_SUMMARY.md) for details.
 
 ## 📚 Documentation
@@ -378,6 +401,12 @@ This project is for educational and demonstration purposes.
 - **Production Ready**: ✅ Yes
 
 ## 📝 Changelog
+
+### v3.1 (2026-04-28) - Fitness Function Fix
+- ✅ **Fixed fitness function**: Changed from player-perspective to HybridAgent-perspective evaluation
+- ✅ **Added HybridAgent stats**: hybrid_wins, player_killed, damage_inflicted to game_stats
+- ✅ **Updated documentation**: Clarified AI evolution mechanism and fitness function design
+- ✅ **Cleaned up comments**: Removed emoji markers, improved code readability
 
 ### v3.0 (2026-04-20) - Major Update
 - ✅ Added straight shot reward mechanism
