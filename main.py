@@ -684,6 +684,17 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 if straight_shot:
                     reward += 0.3
 
+                # 追击进度奖励：距离缩短给正奖励，拉远给负奖励
+                # 使用 potential-based shaping，不改变最优策略
+                curr_dist = math.hypot(
+                    enemy.rect.centerx - reference_player.rect.centerx,
+                    enemy.rect.centery - reference_player.rect.centery
+                )
+                prev_dist = getattr(enemy, '_prev_dist_to_player', None)
+                if prev_dist is not None:
+                    reward += (prev_dist - curr_dist) * 0.02
+                enemy._prev_dist_to_player = curr_dist
+
                 # 对准射击塑形奖励：上一帧选了 ACTION_SHOOT 时，
                 # 根据上一帧状态的 aligned 位判断是否是有效射击决策
                 if enemy.last_action == ACTION_SHOOT:
