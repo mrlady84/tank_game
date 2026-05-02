@@ -54,7 +54,7 @@ import logging
 import pygame
 import bisect
 from config.ai_config import *
-from config.game_config import TILE_SIZE, SCREEN_COLS, SCREEN_ROWS
+from config.game_config import TILE_SIZE, SCREEN_COLS, SCREEN_ROWS, CANDIDATE_TANKS
 from utils.geometry import line_intersects_rect, is_between
 
 # PLAYFIELD_RECT will be initialized at runtime
@@ -892,32 +892,40 @@ class GeneticOptimizer:
 
     def evaluate_fitness(self, individual, game_stats):
         """
-        连续适应度函数。
+        连续适应度函数（满分 ~100）：
 
-        主信号 damage_per_second（伤害密度）替代 damage_ratio：
-            - damage_ratio 在短局（10-20s）下打 1-3 下也只有 0.05-0.15，几乎不区分好坏
-            - dps 反映「单位时间打中能力」，是真实的策略质量指标
-
-        权重（满分 ~100）：
-            dps_norm × 60 + win × 25 + survival × 15
+            dps_norm × 50  — 伤害密度（1.0 hits/s 满分）
+            win_bonus × 20 — 本局胜利
+            survival × 10  — 存活时长（60s 满分）
+            kill_speed × 12 — 击杀速度（越快越高，仅胜局计分）
+            remaining × 8  — 局末剩余敌方坦克比例（场上+候选区）
         """
-        damage_inflicted = game_stats.get('damage_inflicted', 0)
-        hybrid_wins      = game_stats.get('hybrid_wins', 0)
-        survival_time    = game_stats.get('survival_time', 0)
+        damage_inflicted    = game_stats.get('damage_inflicted', 0)
+        hybrid_wins         = game_stats.get('hybrid_wins', 0)
+        survival_time       = game_stats.get('survival_time', 0)
+        enemies_remaining   = game_stats.get('enemies_remaining', 0)
 
         # 伤害密度：1.0 hits/sec 视为满分
         dps = damage_inflicted / max(survival_time, 1.0)
         dps_norm = min(dps, 1.0)
 
-        # 存活时间：60s 视为满分（实测均值 ~14s，原来 120s 上界让此项几乎为 0）
+        # 存活时间：60s 视为满分
         survival_ratio = min(survival_time / 60.0, 1.0)
 
         win_bonus = 1.0 if hybrid_wins else 0.0
 
+        # 击杀速度：胜局中越快击杀玩家得分越高（120s 内线性衰减）
+        kill_speed_norm = max(0.0, 1.0 - survival_time / 120.0) if hybrid_wins else 0.0
+
+        # 剩余坦克比例：局末场上+候选区敌方坦克 / 初始总数
+        remaining_ratio = min(enemies_remaining / max(CANDIDATE_TANKS, 1), 1.0)
+
         fitness = (
-            dps_norm       * 60.0 +
-            win_bonus      * 25.0 +
-            survival_ratio * 15.0
+            dps_norm       * 50.0 +
+            win_bonus      * 20.0 +
+            survival_ratio * 10.0 +
+            kill_speed_norm * 12.0 +
+            remaining_ratio *  8.0
         )
 
         individual['fitness'] = fitness

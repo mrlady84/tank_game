@@ -549,7 +549,8 @@ def reset_game(global_hybrid_agents=None):
 
 def update_physics(players, enemies, bullets, explosions, wall_rects,
                    brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                   current_time, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents):
+                   current_time, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents,
+                   game_start_time=0):
     """
     执行固定时间步长的物理模拟更新
     
@@ -680,6 +681,12 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 # 击中奖励叠加（帧级事件，权重由 GA 优化）
                 if hit_player and not killed_player:
                     reward += enemy_hybrid.reward_weights.get('hit_reward', DEFAULT_HIT_REWARD)
+
+                # 击杀速度奖励：越快击杀玩家额外奖励越高（0~5分，120s内线性衰减）
+                if killed_player:
+                    elapsed_s = (current_time - game_start_time) / 1000.0
+                    kill_speed_bonus = max(0.0, 1.0 - elapsed_s / 120.0) * 5.0
+                    reward += kill_speed_bonus
 
                 # 直线射击奖励（修复：之前 reset 前未读取）
                 if straight_shot:
@@ -1025,7 +1032,8 @@ def main():
                 game_state, score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, delta_killed, delta_damage = update_physics(
                     players, enemies, bullets, explosions, wall_rects,
                     brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                    current_time, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents
+                    current_time, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents,
+                    game_start_time
                 )
                 enemies_killed += delta_killed
                 player_damage_taken += delta_damage
@@ -1058,7 +1066,8 @@ def main():
                         'hybrid_wins': 0,
                         'hybrid_kills': 0,  # 玩家击杀了敌人，不是HybridAgent
                         'player_killed': 0,
-                        'damage_inflicted': player_damage_taken
+                        'damage_inflicted': player_damage_taken,
+                        'enemies_remaining': 0,  # 玩家胜利时敌方全灭
                     }
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
@@ -1100,7 +1109,8 @@ def main():
                     'hybrid_wins': 1,
                     'hybrid_kills': 0,
                     'player_killed': 1,  # HybridAgent击杀了玩家（摧毁老鹰）
-                    'damage_inflicted': player_damage_taken
+                    'damage_inflicted': player_damage_taken,
+                    'enemies_remaining': len(enemies) + candidate_tanks,
                 }
                 for agent in global_hybrid_agents:
                     agent.evolve_before_new_game(game_stats)
@@ -1162,7 +1172,8 @@ def main():
                         'hybrid_wins': 1,
                         'hybrid_kills': enemies_killed,
                         'player_killed': 1,  # HybridAgent击杀了所有玩家
-                        'damage_inflicted': player_damage_taken
+                        'damage_inflicted': player_damage_taken,
+                        'enemies_remaining': len(enemies) + candidate_tanks,
                     }
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
