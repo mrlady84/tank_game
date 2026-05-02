@@ -707,10 +707,9 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 if hit_player and not killed_player:
                     reward += 5.0
 
-                # 记录经验
+                # 记录经验（仅存入 PER buffer，Q值更新由 replay_experience 统一处理）
                 new_state = enemy_hybrid.get_state(enemy, reference_player, wall_rects, enemies)
                 enemy_hybrid.add_experience(enemy.last_state, enemy.last_action, reward, new_state)
-                enemy_hybrid.update_q_value(enemy.last_state, enemy.last_action, reward, new_state)
                 enemy.learning_history.append((enemy.last_state, enemy.last_action, reward))
 
             # 更新状态

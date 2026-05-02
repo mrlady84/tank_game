@@ -402,7 +402,8 @@ class PerformanceOptimizer:
         # 简化障碍物检测 (2种)
         has_obstacle = 0
         if walls:
-            for wall in walls[:5]:  # 只检查前5个墙壁
+            nearby_walls = sorted(walls, key=lambda w: (w.centerx - enemy_x)**2 + (w.centery - enemy_y)**2)[:5]
+            for wall in nearby_walls:
                 wall_center_x = wall.centerx
                 wall_center_y = wall.centery
                 if is_between(wall_center_x, enemy_x, target_x) and \
@@ -462,7 +463,8 @@ class PerformanceOptimizer:
         # 视野奖励
         has_line_of_sight = True
         if walls:
-            for wall in walls[:5]:
+            nearby_walls = sorted(walls, key=lambda w: (w.centerx - enemy_x)**2 + (w.centery - enemy_y)**2)[:5]
+            for wall in nearby_walls:
                 if line_intersects_rect((enemy_x, enemy_y), (target_x, target_y), wall):
                     has_line_of_sight = False
                     break
@@ -963,6 +965,15 @@ class GeneticOptimizer:
     def get_best_parameters(self):
         return self.best_individual if self.best_individual else self.population[0]
 
+    def get_population_diversity(self):
+        """Return std of kill_reward across population as a diversity proxy."""
+        if len(self.population) < 2:
+            return 0.0
+        values = [ind['kill_reward'] for ind in self.population]
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / len(values)
+        return variance ** 0.5
+
 
 class HybridAgent:
     """
@@ -1063,10 +1074,19 @@ class HybridAgent:
         self.game_stats_buffer.append(current_game_stats)
         self.games_played += 1  # ✅ 只在这里增加 games_played
 
-        # 衰减探索率(每局递减5%)
+        # 自适应探索率衰减：状态覆盖率低时保持较高探索
+        # 1728 = 3×3×3×4×2×2×4 (7维状态空间上限)
+        STATE_SPACE_SIZE = 1728
+        coverage_ratio = len(self.q_agent.q_table) / STATE_SPACE_SIZE
+        if coverage_ratio < 0.5:
+            # 覆盖率不足50%时，衰减极慢（每局1%）
+            decay = 0.99
+        else:
+            # 覆盖率充足后，正常衰减（每局2%）
+            decay = 0.98
         self.q_agent.exploration_rate = max(
             MIN_EXPLORATION_RATE,
-            self.q_agent.exploration_rate * 0.95
+            self.q_agent.exploration_rate * decay
         )
 
         # 渐进式进化策略
@@ -1221,7 +1241,8 @@ class PerformanceMonitor:
             'genetic_generation': [],
             'enemy_count': [],
             'bullet_count': [],
-            'game_score': []
+            'game_score': [],
+            'ga_diversity': [],  # std of kill_reward across population
         }
         self.performance_log = []
         self.start_time = time.time()
@@ -1254,6 +1275,7 @@ class PerformanceMonitor:
         self.metrics['enemy_count'].append(frame_data.get('enemy_count', 0))
         self.metrics['bullet_count'].append(frame_data.get('bullet_count', 0))
         self.metrics['game_score'].append(frame_data.get('score', 0))
+        self.metrics['ga_diversity'].append(frame_data.get('ga_diversity', 0.0))
 
         # 定期分析趋势 (每1000帧/17秒，降低频率)
         if len(self.metrics['fps']) % 1000 == 0:
@@ -1340,7 +1362,8 @@ class PerformanceMonitor:
             'genetic_generations': self.metrics['genetic_generation'][-1] if self.metrics['genetic_generation'] else 0,
             'avg_enemy_count': sum(self.metrics['enemy_count'][-50:]) / len(self.metrics['enemy_count'][-50:]) if self.metrics['enemy_count'] else 0,
             'avg_bullet_count': sum(self.metrics['bullet_count'][-50:]) / len(self.metrics['bullet_count'][-50:]) if self.metrics['bullet_count'] else 0,
-            'current_score': self.metrics['game_score'][-1] if self.metrics['game_score'] else 0
+            'current_score': self.metrics['game_score'][-1] if self.metrics['game_score'] else 0,
+            'ga_diversity': self.metrics['ga_diversity'][-1] if self.metrics['ga_diversity'] else 0.0,
         }
 
         return report
