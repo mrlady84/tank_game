@@ -56,8 +56,12 @@ class MetricsData:
         self.games        = deque(maxlen=MAX_HISTORY)
         self.epsilon      = deque(maxlen=MAX_HISTORY)
         self.q_coverage   = deque(maxlen=MAX_HISTORY)
+        self.shoot_ratio  = deque(maxlen=MAX_HISTORY)
+        self.mean_td_err  = deque(maxlen=MAX_HISTORY)
+        self.buf_fill     = deque(maxlen=MAX_HISTORY)
         self.ga_gen       = deque(maxlen=MAX_HISTORY)
         self.best_fitness = deque(maxlen=MAX_HISTORY)
+        self.mean_fitness = deque(maxlen=MAX_HISTORY)
         self.ga_diversity = deque(maxlen=MAX_HISTORY)
         self.surv_times   = deque(maxlen=MAX_HISTORY)
         self.damage_hits  = deque(maxlen=MAX_HISTORY)
@@ -70,9 +74,13 @@ class MetricsData:
         self.games.append(g)
         self.epsilon.append(payload.get('exploration_rate', 0.0))
         self.q_coverage.append(payload.get('q_table_coverage', 0.0))
+        self.shoot_ratio.append(payload.get('shoot_ratio', 0.0))
+        self.mean_td_err.append(payload.get('mean_td_error', 0.0))
+        self.buf_fill.append(payload.get('replay_buffer_fill', 0.0))
         self.ga_gen.append(payload.get('ga_generation', 0))
         raw_fit = payload.get('best_fitness', 0.0)
         self.best_fitness.append(max(raw_fit, 0.0) if raw_fit > -1e9 else 0.0)
+        self.mean_fitness.append(max(payload.get('mean_fitness', 0.0), 0.0))
         self.ga_diversity.append(payload.get('ga_diversity', 0.0) * 100.0)
         self.surv_times.append(payload.get('survival_time', 0.0))
         self.damage_hits.append(float(payload.get('damage_inflicted', 0)))
@@ -169,9 +177,17 @@ def draw_panel_qlearn(surf, rect, data, font_title, font_body):
         _no_data_text(surf, rect, font_body)
         return
     _line_chart(surf, rect,
-                [data.epsilon, data.q_coverage],
-                [COLORS['epsilon'], COLORS['coverage']],
-                [f"ε={data.epsilon[-1]:.3f}", f"cov={data.q_coverage[-1]:.2f}"])
+                [data.epsilon, data.q_coverage, data.shoot_ratio],
+                [COLORS['epsilon'], COLORS['coverage'], COLORS['kill']],
+                [f"ε={data.epsilon[-1]:.3f}",
+                 f"cov={data.q_coverage[-1]:.2f}",
+                 f"shoot%={data.shoot_ratio[-1]*100:.0f}"])
+    # TD error as small text bottom-right
+    if data.mean_td_err:
+        td_lbl = font_body.render(f"TD={data.mean_td_err[-1]:.3f}  buf={data.buf_fill[-1]*100:.0f}%",
+                                  True, COLORS['no_data'])
+        surf.blit(td_lbl, (rect.x + rect.w - td_lbl.get_width() - 6,
+                            rect.y + rect.h - td_lbl.get_height() - 4))
 
 
 def draw_panel_ga(surf, rect, data, font_title, font_body):
@@ -181,9 +197,11 @@ def draw_panel_ga(surf, rect, data, font_title, font_body):
         _no_data_text(surf, rect, font_body)
         return
     _line_chart(surf, rect,
-                [data.best_fitness, data.ga_diversity],
-                [COLORS['fitness'], COLORS['diversity']],
-                [f"fit={data.best_fitness[-1]:.1f}", f"div×100={data.ga_diversity[-1]:.1f}"])
+                [data.best_fitness, data.mean_fitness, data.ga_diversity],
+                [COLORS['fitness'], COLORS['team'], COLORS['diversity']],
+                [f"best={data.best_fitness[-1]:.1f}",
+                 f"mean={data.mean_fitness[-1]:.1f}",
+                 f"div×100={data.ga_diversity[-1]:.1f}"])
 
 
 def draw_panel_weights(surf, rect, data, font_title, font_body):

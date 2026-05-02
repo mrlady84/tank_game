@@ -590,6 +590,12 @@ class QLearningAgent:
         self.learning_rate = LEARNING_RATE
         self.discount_factor = DISCOUNT_FACTOR
         self.replay_buffer = PrioritizedReplayBuffer(REPLAY_BUFFER_SIZE)
+
+        # 可观测指标
+        self.action_counts = [0] * NUM_ACTIONS  # 各动作被选次数
+        self.shoot_ratio = 0.0                  # ACTION_SHOOT 占比（滑动更新）
+        self.mean_td_error = 0.0                # 最近一批 replay 的平均 TD error
+
         self.load_q_table()
 
     def _record_access(self, state):
@@ -633,9 +639,15 @@ class QLearningAgent:
     def get_action(self, state):
         """ε-贪心策略选择动作"""
         if random.random() < self.exploration_rate:
-            return random.randint(0, NUM_ACTIONS - 1)
+            action = random.randint(0, NUM_ACTIONS - 1)
         else:
-            return self.get_best_action(state)
+            action = self.get_best_action(state)
+
+        self.action_counts[action] += 1
+        total = sum(self.action_counts)
+        if total > 0:
+            self.shoot_ratio = self.action_counts[ACTION_SHOOT] / total
+        return action
 
     def get_best_action(self, state):
         """获取当前状态下Q值最大的动作，随机打破平局"""
@@ -733,6 +745,9 @@ class QLearningAgent:
 
         # 更新优先级
         self.replay_buffer.update_priorities(indices, new_priorities)
+
+        if new_priorities:
+            self.mean_td_error = sum(new_priorities) / len(new_priorities)
 
         self._enforce_q_table_limit()
 
@@ -872,6 +887,7 @@ class GeneticOptimizer:
         self.generation = 0
         self.best_individual = None
         self.best_fitness = -float('inf')
+        self.mean_fitness = 0.0
         self.initialize_population()
 
     def initialize_population(self):
@@ -966,6 +982,9 @@ class GeneticOptimizer:
 
         # 排序
         self.population.sort(key=lambda x: x['fitness'], reverse=True)
+
+        # 种群平均 fitness
+        self.mean_fitness = sum(ind['fitness'] for ind in self.population) / len(self.population)
 
         # 更新最优个体
         if self.population[0]['fitness'] > self.best_fitness:
@@ -1207,6 +1226,9 @@ class HybridAgent:
             self.genetic_optimizer.population.sort(
                 key=lambda x: x['fitness'], reverse=True
             )
+            self.genetic_optimizer.mean_fitness = sum(
+                ind['fitness'] for ind in self.genetic_optimizer.population
+            ) / len(self.genetic_optimizer.population)
             if self.genetic_optimizer.population[0]['fitness'] > self.genetic_optimizer.best_fitness:
                 self.genetic_optimizer.best_individual = copy.deepcopy(self.genetic_optimizer.population[0])
                 self.genetic_optimizer.best_fitness = self.genetic_optimizer.population[0]['fitness']

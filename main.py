@@ -221,6 +221,7 @@ class Tank:
         # 击中标记：用于AI奖励计算
         self.hit_player_this_frame = False
         self.killed_player_this_frame = False
+        self.took_damage_this_frame = False
         # 直线射击标记：当敌方坦克与玩家在一条直线上成功发射炮弹
         self.straight_shot_this_frame = False
 
@@ -381,6 +382,9 @@ def handle_enemy_collision(bullet, bullet_rect, enemies, explosions, bullets, sc
             explosions.append(Explosion(enemy.rect.centerx, enemy.rect.centery))
             if bullet in bullets:
                 bullets.remove(bullet)
+
+            # 标记敌方坦克被击中（用于AI惩罚）
+            enemy.took_damage_this_frame = True
 
             # 从敌人死亡前学习
             if enemy.learning_history and q_agent_instance:
@@ -638,6 +642,9 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
     if current_time - enemy_ai_timer > 100:
         enemy_ai_timer = current_time
 
+        # 动态刷新 reference_player，防止 players[0] 在本帧内已被移除
+        reference_player = players[0] if players else None
+
         # 分配战术角色（aggressor/flanker/suppressor）
         shared_hybrid = None
         if enemies and reference_player:
@@ -667,16 +674,18 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 killed_player = enemy.killed_player_this_frame
                 hit_player = enemy.hit_player_this_frame
                 straight_shot = enemy.straight_shot_this_frame
+                took_damage = enemy.took_damage_this_frame
                 enemy.killed_player_this_frame = False
                 enemy.hit_player_this_frame = False
                 enemy.straight_shot_this_frame = False
+                enemy.took_damage_this_frame = False
 
                 # 使用协同奖励系统（含角色距离奖励、视野奖励、团队协调）
                 reward = enemy_hybrid.get_cooperative_reward(
                     enemy, enemy.last_action, reference_player, enemies,
                     enemy_roles_cache, wall_rects,
                     killed_player=killed_player,
-                    took_damage=False
+                    took_damage=took_damage
                 )
                 # 击中奖励叠加（帧级事件，权重由 GA 优化）
                 if hit_player and not killed_player:
@@ -856,7 +865,19 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                     base_tiles.remove(rect)  # 老鹰被摧毁，从列表移除
                     if rect in wall_rects:
                         wall_rects.remove(rect)  # 也从wall_rects移除
-                    
+
+                    # 给击毁老鹰的敌方坦克一个大正奖励，写入 PER buffer
+                    if hasattr(bullet, 'owner_tank') and bullet.owner_tank:
+                        shooter = bullet.owner_tank
+                        agent = enemy_ais.get(shooter) if enemy_ais else None
+                        if agent and shooter.last_state is not None and shooter.last_action is not None:
+                            elapsed_s = (current_time - game_start_time) / 1000.0
+                            eagle_speed_bonus = max(0.0, 1.0 - elapsed_s / 120.0) * 10.0
+                            eagle_reward = 30.0 + eagle_speed_bonus
+                            dummy_next = shooter.last_state  # 终局，next_state 无意义
+                            agent.add_experience(shooter.last_state, shooter.last_action, eagle_reward, dummy_next)
+                            agent.replay_experience()
+
                     # 老鹰被打掉，立即重开一局
                     logging.info("🦅 老鹰被摧毁！立即重开一局")
                     return 'eagle_destroyed', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, frame_enemies_killed, frame_player_damage
@@ -944,18 +965,24 @@ def _start_metrics_window(q):
 
 def _build_metrics_payload(agent, survival_time, hybrid_wins_this_game, damage_inflicted=0):
     STATE_SPACE_SIZE = 3456  # 8维状态: 3×3×3×4×2×2×4×2
+    q_table_cap = min(STATE_SPACE_SIZE, agent.q_agent.max_q_table_size)
     return {
         'games_played':       agent.games_played,
         'exploration_rate':   agent.q_agent.exploration_rate,
-        'q_table_coverage':   len(agent.q_agent.q_table) / STATE_SPACE_SIZE,
+        'q_table_coverage':   len(agent.q_agent.q_table) / q_table_cap,
         'ga_generation':      agent.genetic_optimizer.generation,
         'best_fitness':       agent.genetic_optimizer.best_fitness,
+        'mean_fitness':       agent.genetic_optimizer.mean_fitness,
         'ga_diversity':       agent.genetic_optimizer.get_population_diversity(),
         'reward_weights':     dict(agent.reward_weights),
         'survival_time':      survival_time,
         'hybrid_wins':        hybrid_wins_this_game,
         'player_wins':        1 - hybrid_wins_this_game,
         'damage_inflicted':   damage_inflicted,
+        'shoot_ratio':        agent.q_agent.shoot_ratio,
+        'mean_td_error':      agent.q_agent.mean_td_error,
+        'replay_buffer_fill': len(agent.q_agent.replay_buffer) / agent.q_agent.replay_buffer.capacity,
+        'ga_buffer_size':     len(agent.game_stats_buffer),
     }
 
 
