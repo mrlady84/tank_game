@@ -12,7 +12,7 @@
    - 每300帧清理过期缓存
 
 3. QLearningAgent - Q学习算法实现
-   - 状态空间: 相对位置(3x3) x 距离(3) x 方向(4) x 障碍(2) x 盟友(2) = 432种
+   - 状态空间: 相对位置(3x3) x 距离(3) x 方向(4) x 障碍(2) x 盟友(2) x 朝向(4) = 1728种
    - 动作空间: 4个移动方向
    - LRU淘汰机制(Q-table最大5000状态)
 
@@ -157,20 +157,20 @@ class PrioritizedReplayBuffer:
             return [], [], []
 
         indices = []
-        max_attempts = batch_size * 10  # 限制最大尝试次数
+        seen = set()
+        max_attempts = batch_size * 10
 
         for _ in range(batch_size):
             if len(indices) >= batch_size:
                 break
 
-            # 拒绝采样：避免线性扫描
             for _ in range(max_attempts):
                 r = random.random() * total_priority
                 idx = bisect.bisect_left(self.cumulative_probs, r)
 
-                # 确保索引有效且未被选择
-                if idx < len(self.buffer) and idx not in indices:
+                if idx < len(self.buffer) and idx not in seen:
                     indices.append(idx)
+                    seen.add(idx)
                     break
 
         if not indices:
@@ -208,9 +208,6 @@ class PrioritizedReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-
-# Game constants (will be passed from main)
-TILE_SIZE = 32
 
 
 class PerformanceOptimizer:
@@ -286,18 +283,17 @@ class PerformanceOptimizer:
         current_frame_group = self.frame_count // self.cache_timeout
         min_frame_group = current_frame_group - 3
 
-        # 原地删除过期缓存，避免创建新字典
-        expired_state_keys = [k for k, v in self.state_cache.items() if k[2] < min_frame_group]
+        expired_state_keys = [k for k in self.state_cache if k[-1] < min_frame_group]
         for k in expired_state_keys:
             del self.state_cache[k]
 
-        expired_reward_keys = [k for k, v in self.reward_cache.items() if k[4] < min_frame_group]
+        expired_reward_keys = [k for k in self.reward_cache if k[-2] < min_frame_group]
         for k in expired_reward_keys:
             del self.reward_cache[k]
 
     def get_cached_state(self, enemy, target, walls, all_enemies, force_update=False):
         """获取缓存的状态，如果不存在则计算 - 优化键设计"""
-        # 使用当前的帧组合作为缓存键
+        self._cleanup_cache()
         current_frame_group = self.frame_count // self.cache_timeout
 
         # 改进的缓存键：使用网格位置替代id，提高命中率
@@ -309,6 +305,7 @@ class PerformanceOptimizer:
         cache_key = (
             enemy_grid_x,
             enemy_grid_y,
+            enemy.direction,
             target_grid_x,
             target_grid_y,
             current_frame_group
@@ -337,6 +334,8 @@ class PerformanceOptimizer:
         # 权重哈希：不同权重个体不能共享缓存
         weights_key = tuple(sorted(reward_weights.items())) if reward_weights else ()
 
+        role = roles.get(enemy, 'suppressor')
+
         cache_key = (
             enemy_grid_x,
             enemy_grid_y,
@@ -345,6 +344,7 @@ class PerformanceOptimizer:
             took_damage,
             target_grid_x,
             target_grid_y,
+            role,
             current_frame_group,
             weights_key
         )
@@ -547,12 +547,13 @@ class QLearningAgent:
         ε (exploration_rate): 探索率，ε-贪心策略的随机探索概率
     
     状态表示:
-        (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally)
+        (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally, self_facing)
         - rel_x/rel_y: 目标相对位置(0=左/上, 1=同行/列, 2=右/下)
         - distance_cat: 距离分类(0<100px, 1<250px, 2>=250px)
         - direction: 目标方向(0上, 1右, 2下, 3左)
         - has_obstacle: 是否有障碍物阻挡
         - has_ally: 150px内是否有盟友
+        - self_facing: 自身朝向(0上, 1右, 2下, 3左)
     
     优化机制:
         - LRU淘汰: Q-table超过5000状态时淘汰最久未访问的
@@ -575,11 +576,7 @@ class QLearningAgent:
         self.load_q_table()
 
     def _record_access(self, state):
-        """记录状态访问，用于LRU（修复版 - 使用set去重）"""
-        # 使用set跟踪已记录的状态，避免重复
-        if not hasattr(self, '_recorded_states'):
-            self._recorded_states = set()
-
+        """记录状态访问，用于LRU"""
         if state not in self._recorded_states:
             self.q_table_access_order.append(state)
             self._recorded_states.add(state)
@@ -624,15 +621,10 @@ class QLearningAgent:
             return self.get_best_action(state)
 
     def get_best_action(self, state):
-        """
-        获取当前状态下Q值最大的动作
-        优化版：使用defaultdict自动初始化，单次遍历找最大
-        """
-        values = self.q_table[state]  # defaultdict自动初始化新状态
+        """获取当前状态下Q值最大的动作"""
+        values = self.q_table[state]
         self._record_access(state)
-        self._enforce_q_table_limit()
 
-        # 优化：单次遍历同时找最大值和索引，避免.index()的O(n)搜索
         max_idx = 0
         max_val = values[0]
         for i in range(1, 4):
@@ -724,26 +716,22 @@ class QLearningAgent:
         # 更新优先级
         self.replay_buffer.update_priorities(indices, new_priorities)
 
+        self._enforce_q_table_limit()
+
     def learn_from_death(self, enemy_history):
         """从死亡序列中学习，然后清空历史避免重复学习"""
         if not enemy_history:
             return
 
-        # 从序列中学习
         for i in range(len(enemy_history) - 1):
             state, action, reward = enemy_history[i]
             next_state, _, _ = enemy_history[i + 1]
             self.add_experience(state, action, reward, next_state)
-            self.update_q_value(state, action, reward, next_state)
 
-        # 最后一个状态获得死亡惩罚
         last_state, last_action, _ = enemy_history[-1]
-        # 死亡状态：距离近(0)、有障碍(1)、无盟友(0)，朝向保持不变
         death_state = (last_state[0], last_state[1], 0, last_state[3], 1, 0, last_state[6])
         self.add_experience(last_state, last_action, -10, death_state)
-        self.update_q_value(last_state, last_action, -10, death_state)
 
-        # 经验回放
         self.replay_experience()
 
     def load_q_table(self):
@@ -966,13 +954,18 @@ class GeneticOptimizer:
         return self.best_individual if self.best_individual else self.population[0]
 
     def get_population_diversity(self):
-        """Return std of kill_reward across population as a diversity proxy."""
+        """Return average normalized std across all genes as a diversity metric."""
         if len(self.population) < 2:
             return 0.0
-        values = [ind['kill_reward'] for ind in self.population]
-        mean = sum(values) / len(values)
-        variance = sum((v - mean) ** 2 for v in values) / len(values)
-        return variance ** 0.5
+        total_std = 0.0
+        for key, (lo, hi) in self._GENE_RANGES.items():
+            values = [ind[key] for ind in self.population]
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            gene_range = hi - lo
+            if gene_range > 0:
+                total_std += (variance ** 0.5) / gene_range
+        return total_std / len(self._GENE_RANGES)
 
 
 class HybridAgent:
@@ -1219,10 +1212,6 @@ class HybridAgent:
         )
 
     # save_q_table 已删除：已被save_checkpoint完全替代
-
-
-# 全局混合智能代理实例
-q_agent = HybridAgent()
 
 
 class PerformanceMonitor:

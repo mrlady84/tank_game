@@ -49,7 +49,7 @@ except ModuleNotFoundError:
     psutil = None
     PSUTIL_AVAILABLE = False
 
-from tank_ai import q_agent, can_move_rect, performance_monitor, HybridAgent, AutoAI, has_clear_line
+from tank_ai import can_move_rect, performance_monitor, performance_optimizer, HybridAgent, AutoAI, has_clear_line
 from config.game_config import *
 
 if not PSUTIL_AVAILABLE:
@@ -566,7 +566,6 @@ def reset_game(global_hybrid_agents=None):
         enemy.last_action = None
 
     # 清理性能优化器的缓存
-    from tank_ai import performance_optimizer
     performance_optimizer.state_cache.clear()
     performance_optimizer.reward_cache.clear()
     performance_optimizer.frame_count = 0
@@ -578,7 +577,7 @@ def reset_game(global_hybrid_agents=None):
 
 def update_physics(players, enemies, bullets, explosions, wall_rects,
                    brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                   current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents):
+                   current_time, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents):
     """
     执行固定时间步长的物理模拟更新
     
@@ -610,7 +609,6 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
         score: 当前分数
         candidate_tanks: 剩余可重生坦克数
         current_time: 当前游戏时间(毫秒)
-        q_agent: AI代理实例(HybridAgent)
         enemy_timer: 敌人生成计时器
         player_ai_timer: 玩家AI决策计时器
         enemy_ai_timer: 敌方AI决策计时器
@@ -623,6 +621,8 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 player_ai_timer, enemy_ai_timer, enemy_roles_cache)
         game_state: 'playing' | 'game_over' | 'eagle_destroyed'
     """
+    performance_optimizer.frame_count += 1
+
     reference_player = players[0] if players else None
     frame_enemies_killed = 0
     frame_player_damage = 0
@@ -829,7 +829,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
 
         if bullet.owner == 'player':
             hit_enemy, score, candidate_tanks, killed = handle_enemy_collision(
-                bullet, path_rect, enemies, explosions, bullets, score, candidate_tanks, players, q_agent, enemy_ais, global_hybrid_agents
+                bullet, path_rect, enemies, explosions, bullets, score, candidate_tanks, players, global_hybrid_agents[0] if global_hybrid_agents else None, enemy_ais, global_hybrid_agents
             )
             if hit_enemy:
                 frame_enemies_killed += killed
@@ -1039,7 +1039,7 @@ def main():
                 game_state, score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, delta_killed, delta_damage = update_physics(
                     players, enemies, bullets, explosions, wall_rects,
                     brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                    current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents
+                    current_time, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents
                 )
                 enemies_killed += delta_killed
                 player_damage_taken += delta_damage
