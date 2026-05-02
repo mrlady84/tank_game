@@ -64,11 +64,12 @@ class TestQTableOptimization(unittest.TestCase):
     
     def test_defaultdict_auto_init(self):
         """测试defaultdict自动初始化"""
-        # 访问不存在的状态 - 应该自动初始化为[0.0, 0.0, 0.0, 0.0]
+        # 访问不存在的状态 - 应该自动初始化为长度 NUM_ACTIONS 的零向量
+        from tank_ai import NUM_ACTIONS
         state = (0, 1, 2, 3, 0, 1)
         values = self.agent.q_table[state]
-        
-        self.assertEqual(values, [0.0, 0.0, 0.0, 0.0])
+
+        self.assertEqual(values, [0.0] * NUM_ACTIONS)
     
     def test_get_best_action_performance(self):
         """测试get_best_action性能"""
@@ -89,9 +90,13 @@ class TestQTableOptimization(unittest.TestCase):
     
     def test_optimized_max_lookup(self):
         """测试优化后的max查找（单次遍历）"""
+        from tank_ai import NUM_ACTIONS
         state = (1, 1, 1, 1, 0, 0)
-        self.agent.q_table[state] = [0.1, 0.5, 0.3, 0.2]
-        
+        # 构造长度为 NUM_ACTIONS 的Q值列表，最大值在索引1
+        values = [0.0] * NUM_ACTIONS
+        values[0], values[1], values[2], values[3] = 0.1, 0.5, 0.3, 0.2
+        self.agent.q_table[state] = values
+
         action = self.agent.get_best_action(state)
         self.assertEqual(action, 1)  # 最大值0.5的索引是1
 

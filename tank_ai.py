@@ -534,6 +534,11 @@ def can_move_rect(rect, dx, dy, walls):
     return True
 
 
+# 动作空间：0-3 移动方向（上/右/下/左），4 射击
+NUM_ACTIONS = 5
+ACTION_SHOOT = 4
+
+
 class QLearningAgent:
     """
     Q学习算法实现
@@ -563,8 +568,8 @@ class QLearningAgent:
 
     def __init__(self):
         """初始化Q学习代理"""
-        # 使用defaultdict自动初始化新状态为[0.0, 0.0, 0.0, 0.0]
-        self.q_table = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
+        # 使用defaultdict自动初始化新状态为长度 NUM_ACTIONS 的零向量
+        self.q_table = defaultdict(lambda: [0.0] * NUM_ACTIONS)
         self.q_table_access_order = deque()  # 记录访问顺序，用于LRU
         self.max_q_table_size = 5000  # 限制Q-table最大大小
         self._recorded_states = set()  # 辅助LRU去重
@@ -616,7 +621,7 @@ class QLearningAgent:
     def get_action(self, state):
         """ε-贪心策略选择动作"""
         if random.random() < self.exploration_rate:
-            return random.randint(0, 3)
+            return random.randint(0, NUM_ACTIONS - 1)
         else:
             return self.get_best_action(state)
 
@@ -627,7 +632,7 @@ class QLearningAgent:
 
         max_idx = 0
         max_val = values[0]
-        for i in range(1, 4):
+        for i in range(1, NUM_ACTIONS):
             if values[i] > max_val:
                 max_val = values[i]
                 max_idx = i
@@ -642,9 +647,9 @@ class QLearningAgent:
         old_value = self.q_table[state][action]
         next_values = self.q_table[next_state]
 
-        # 使用优化后的max查找（只有4个元素，手动展开比max()更快）
+        # 使用优化后的max查找（手动展开比max()更快）
         next_max = next_values[0]
-        for i in range(1, 4):
+        for i in range(1, NUM_ACTIONS):
             if next_values[i] > next_max:
                 next_max = next_values[i]
 
@@ -668,7 +673,7 @@ class QLearningAgent:
 
         # 使用优化后的max查找
         next_max = next_values[0]
-        for i in range(1, 4):
+        for i in range(1, NUM_ACTIONS):
             if next_values[i] > next_max:
                 next_max = next_values[i]
 
@@ -698,7 +703,7 @@ class QLearningAgent:
 
             # 使用优化后的max查找
             next_max = next_values[0]
-            for j in range(1, 4):
+            for j in range(1, NUM_ACTIONS):
                 if next_values[j] > next_max:
                     next_max = next_values[j]
 
@@ -738,13 +743,19 @@ class QLearningAgent:
         """
         加载Q表
         优化版：将加载的dict转换为defaultdict
+        兼容旧存档（4动作）：自动补零扩展到 NUM_ACTIONS
         """
         try:
             with open('q_table.pkl', 'rb') as f:
                 loaded = pickle.load(f)
                 # 转换为defaultdict，自动初始化新状态
                 if isinstance(loaded, dict):
-                    self.q_table = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0], loaded)
+                    migrated = {}
+                    for k, v in loaded.items():
+                        if isinstance(v, list) and len(v) < NUM_ACTIONS:
+                            v = list(v) + [0.0] * (NUM_ACTIONS - len(v))
+                        migrated[k] = v
+                    self.q_table = defaultdict(lambda: [0.0] * NUM_ACTIONS, migrated)
                 else:
                     self.q_table = loaded
         except (IOError, OSError, pickle.UnpicklingError):
@@ -851,40 +862,47 @@ class GeneticOptimizer:
     def initialize_population(self):
         """初始化种群，基因为奖励权重"""
         for _ in range(POPULATION_SIZE):
-            individual = {
-                'kill_reward':    random.uniform(10.0, 30.0),
-                'hit_reward':     random.uniform(2.0,  10.0),
-                'distance_scale': random.uniform(0.5,   3.0),
-                'team_bonus':     random.uniform(0.1,   1.0),
-                'survival_bonus': random.uniform(0.01,  0.2),
-                'fitness': 0
-            }
-            self.population.append(individual)
+            self.population.append(self._random_individual())
+
+    def _random_individual(self):
+        """生成一个完全随机的个体（用于初始化和多样性注入）"""
+        return {
+            'kill_reward':    random.uniform(*self._GENE_RANGES['kill_reward']),
+            'hit_reward':     random.uniform(*self._GENE_RANGES['hit_reward']),
+            'distance_scale': random.uniform(*self._GENE_RANGES['distance_scale']),
+            'team_bonus':     random.uniform(*self._GENE_RANGES['team_bonus']),
+            'survival_bonus': random.uniform(*self._GENE_RANGES['survival_bonus']),
+            'fitness': 0,
+        }
 
     def evaluate_fitness(self, individual, game_stats):
         """
-        连续适应度函数 - 以伤害比例为主信号，消除二元胜负主导问题。
+        连续适应度函数。
 
-        damage_ratio = damage_inflicted / PLAYER_MAX_HP  (0~1 连续)
-        survival_ratio = survival_time / FITNESS_MAX_GAME_S  (0~1 连续)
+        主信号 damage_per_second（伤害密度）替代 damage_ratio：
+            - damage_ratio 在短局（10-20s）下打 1-3 下也只有 0.05-0.15，几乎不区分好坏
+            - dps 反映「单位时间打中能力」，是真实的策略质量指标
+
+        权重（满分 ~100）：
+            dps_norm × 60 + win × 25 + survival × 15
+        """
+        damage_inflicted = game_stats.get('damage_inflicted', 0)
+        hybrid_wins      = game_stats.get('hybrid_wins', 0)
+        survival_time    = game_stats.get('survival_time', 0)
+
+        # 伤害密度：1.0 hits/sec 视为满分
+        dps = damage_inflicted / max(survival_time, 1.0)
+        dps_norm = min(dps, 1.0)
+
+        # 存活时间：60s 视为满分（实测均值 ~14s，原来 120s 上界让此项几乎为 0）
+        survival_ratio = min(survival_time / 60.0, 1.0)
+
         win_bonus = 1.0 if hybrid_wins else 0.0
 
-        fitness = damage_ratio*60 + win_bonus*30 + survival_ratio*10 + team_coordination*0.5
-        """
-        damage_inflicted  = game_stats.get('damage_inflicted', 0)
-        hybrid_wins       = game_stats.get('hybrid_wins', 0)
-        survival_time     = game_stats.get('survival_time', 0)
-        team_coordination = game_stats.get('team_coordination', 0)
-
-        damage_ratio   = min(damage_inflicted / PLAYER_MAX_HP, 1.0)
-        survival_ratio = min(survival_time / FITNESS_MAX_GAME_S, 1.0)
-        win_bonus      = 1.0 if hybrid_wins else 0.0
-
         fitness = (
-            damage_ratio   * 60.0 +
-            win_bonus      * 30.0 +
-            survival_ratio * 10.0 +
-            team_coordination * 0.5
+            dps_norm       * 60.0 +
+            win_bonus      * 25.0 +
+            survival_ratio * 15.0
         )
 
         individual['fitness'] = fitness
@@ -914,7 +932,7 @@ class GeneticOptimizer:
         """高斯变异，按各基因范围裁剪"""
         for key, (lo, hi) in self._GENE_RANGES.items():
             if key in individual and random.random() < MUTATION_RATE:
-                sigma = (hi - lo) * 0.1
+                sigma = (hi - lo) * 0.2
                 individual[key] = max(lo, min(hi, individual[key] + random.gauss(0, sigma)))
         return individual
 
@@ -946,6 +964,15 @@ class GeneticOptimizer:
             new_population.append(child)
 
         self.population = new_population
+
+        # 多样性注入：种群崩溃时替换底部 30% 为随机个体
+        # Why: 精英保留+小变异容易导致种群快速收敛，div=0 后 GA 等同停止优化
+        if self.get_population_diversity() < 0.05:
+            self.population.sort(key=lambda x: x['fitness'], reverse=True)
+            inject_count = max(1, POPULATION_SIZE * 3 // 10)
+            for i in range(POPULATION_SIZE - inject_count, POPULATION_SIZE):
+                self.population[i] = self._random_individual()
+
         self.generation += 1
 
         return self.best_individual
@@ -1027,8 +1054,14 @@ class HybridAgent:
                 data = pickle.load(f)
             
             if 'q_table' in data:
-                # 将普通 dict 转换回 defaultdict
-                self.q_agent.q_table = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0], data['q_table'])
+                # 将普通 dict 转换回 defaultdict；兼容旧4动作存档
+                raw = data['q_table']
+                migrated = {}
+                for k, v in raw.items():
+                    if isinstance(v, list) and len(v) < NUM_ACTIONS:
+                        v = list(v) + [0.0] * (NUM_ACTIONS - len(v))
+                    migrated[k] = v
+                self.q_agent.q_table = defaultdict(lambda: [0.0] * NUM_ACTIONS, migrated)
             if 'best_individual' in data:
                 self.genetic_optimizer.best_individual = data['best_individual']
                 self.genetic_optimizer.best_fitness = data.get('best_fitness', -float('inf'))
@@ -1133,6 +1166,13 @@ class HybridAgent:
                 new_population.append(child)
 
             self.genetic_optimizer.population = new_population
+
+            # 多样性注入：与标准 evolve 一致
+            if self.genetic_optimizer.get_population_diversity() < 0.05:
+                self.genetic_optimizer.population.sort(key=lambda x: x['fitness'], reverse=True)
+                inject_count = max(1, POPULATION_SIZE * 3 // 10)
+                for i in range(POPULATION_SIZE - inject_count, POPULATION_SIZE):
+                    self.genetic_optimizer.population[i] = self.genetic_optimizer._random_individual()
 
             # 更新最优个体
             self.genetic_optimizer.population.sort(

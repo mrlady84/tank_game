@@ -49,7 +49,7 @@ except ModuleNotFoundError:
     psutil = None
     PSUTIL_AVAILABLE = False
 
-from tank_ai import can_move_rect, performance_monitor, performance_optimizer, HybridAgent, AutoAI, has_clear_line
+from tank_ai import can_move_rect, performance_monitor, performance_optimizer, HybridAgent, AutoAI, has_clear_line, ACTION_SHOOT
 from config.game_config import *
 
 if not PSUTIL_AVAILABLE:
@@ -370,35 +370,6 @@ def can_move_rect(rect, dx, dy, walls):
     return True
 
 
-def has_clear_line_improved(source_rect, target_rect, walls, tolerance=TILE_SIZE):
-    """
-    改进的直线检测函数，允许一定角度偏差
-    tolerance: 允许的偏差范围（像素）
-    """
-    # 计算中心点
-    src_x, src_y = source_rect.centerx, source_rect.centery
-    tgt_x, tgt_y = target_rect.centerx, target_rect.centery
-
-    # 检查是否在同一水平线或垂直线上，允许一定容差
-    if abs(src_x - tgt_x) <= tolerance or abs(src_y - tgt_y) <= tolerance:
-        # 创建子弹路径矩形
-        if abs(src_x - tgt_x) < abs(src_y - tgt_y):  # 主要是垂直方向
-            start_y = min(src_y, tgt_y)
-            end_y = max(src_y, tgt_y)
-            line_rect = pygame.Rect(src_x - 2, start_y, 4, end_y - start_y)
-        else:  # 主要是水平方向
-            start_x = min(src_x, tgt_x)
-            end_x = max(src_x, tgt_x)
-            line_rect = pygame.Rect(start_x, src_y - 2, end_x - start_x, 4)
-
-        # 检查路径上是否有墙壁
-        for wall in walls:
-            if line_rect.colliderect(wall):
-                return False
-        return True
-    return False
-
-
 def handle_enemy_collision(bullet, bullet_rect, enemies, explosions, bullets, score, candidate_tanks, players=None, q_agent_instance=None, enemy_ais=None, global_hybrid_agents=None):
     """Handle bullet collision with enemies"""
     if players is None:
@@ -717,69 +688,54 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
             enemy.last_state = state
             enemy.last_action = action
 
-            # 优化：添加直接追击逻辑
-            # 计算最佳追击方向
-            dx_player = reference_player.rect.centerx - enemy.rect.centerx
-            dy_player = reference_player.rect.centery - enemy.rect.centery
-            
-            # 确定主要追击方向
-            if abs(dx_player) > abs(dy_player):
-                # 水平方向追击
-                preferred_dir = 1 if dx_player > 0 else 3  # 右或左
+            # 分支：射击动作 vs 移动动作（由 HybridAgent 自主决定）
+            if action == ACTION_SHOOT:
+                # 射击动作：保持当前方向，尝试开火
+                if enemy.can_shoot(current_time):
+                    # 检测直线射击（用于奖励信号）
+                    if (abs(enemy.rect.centerx - reference_player.rect.centerx) < TILE_SIZE // 2 or
+                        abs(enemy.rect.centery - reference_player.rect.centery) < TILE_SIZE // 2):
+                        enemy.straight_shot_this_frame = True
+                    shot = enemy.shoot(current_time)
+                    bullets.append(shot)
             else:
-                # 垂直方向追击
-                preferred_dir = 2 if dy_player > 0 else 0  # 下或上
-            
-            # 尝试优先使用Q-learning建议的方向，如果不行则使用追击方向
-            directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 上、右、下、左
-            dx, dy = directions[action]
+                # 移动动作（0-3）：方向选择 + 受阻回退
+                # 优化：添加直接追击逻辑
+                # 计算最佳追击方向
+                dx_player = reference_player.rect.centerx - enemy.rect.centerx
+                dy_player = reference_player.rect.centery - enemy.rect.centery
 
-            # 检查是否可行
-            from tank_ai import can_move_rect
-            if can_move_rect(enemy.rect, dx * enemy.speed, dy * enemy.speed, wall_rects):
-                enemy.direction = action
-            else:
-                # 优化：优先尝试追击方向
-                dx_preferred, dy_preferred = directions[preferred_dir]
-                if can_move_rect(enemy.rect, dx_preferred * enemy.speed, dy_preferred * enemy.speed, wall_rects):
-                    enemy.direction = preferred_dir
+                # 确定主要追击方向
+                if abs(dx_player) > abs(dy_player):
+                    # 水平方向追击
+                    preferred_dir = 1 if dx_player > 0 else 3  # 右或左
                 else:
-                    # 回退到随机可行方向
-                    import random
-                    random_directions = [0, 1, 2, 3]
-                    random.shuffle(random_directions)
-                    for dir_idx in random_directions:
-                        ddx, ddy = directions[dir_idx]
-                        if can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, wall_rects):
-                            enemy.direction = dir_idx
-                            break
+                    # 垂直方向追击
+                    preferred_dir = 2 if dy_player > 0 else 0  # 下或上
 
-            # 智能射击决策 - 放宽条件，提高敌方活跃度
-            if enemy.can_shoot(current_time):
-                # 检查是否面向玩家（允许一定角度偏差）
-                dx = reference_player.rect.centerx - enemy.rect.centerx
-                dy = reference_player.rect.centery - enemy.rect.centery
-                
-                # 根据方向检查是否大致朝向玩家
-                facing_player = False
-                if enemy.direction == 0:  # 上
-                    facing_player = dy < 0 and abs(dx) < TILE_SIZE * 2
-                elif enemy.direction == 1:  # 右
-                    facing_player = dx > 0 and abs(dy) < TILE_SIZE * 2
-                elif enemy.direction == 2:  # 下
-                    facing_player = dy > 0 and abs(dx) < TILE_SIZE * 2
-                elif enemy.direction == 3:  # 左
-                    facing_player = dx < 0 and abs(dy) < TILE_SIZE * 2
-                
-                if facing_player:
-                    # 检查是否有清晰射界（使用改进版，允许一定容差）
-                    if has_clear_line_improved(enemy.rect, reference_player.rect, wall_rects):
-                        # 检测是否在一条直线上射击（水平或垂直对齐）
-                        if (abs(enemy.rect.centerx - reference_player.rect.centerx) < TILE_SIZE // 2 or
-                            abs(enemy.rect.centery - reference_player.rect.centery) < TILE_SIZE // 2):
-                            enemy.straight_shot_this_frame = True
-                        shot = enemy.shoot(current_time)
-                        bullets.append(shot)
+                # 尝试优先使用Q-learning建议的方向，如果不行则使用追击方向
+                directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 上、右、下、左
+                dx, dy = directions[action]
+
+                # 检查是否可行
+                from tank_ai import can_move_rect
+                if can_move_rect(enemy.rect, dx * enemy.speed, dy * enemy.speed, wall_rects):
+                    enemy.direction = action
+                else:
+                    # 优化：优先尝试追击方向
+                    dx_preferred, dy_preferred = directions[preferred_dir]
+                    if can_move_rect(enemy.rect, dx_preferred * enemy.speed, dy_preferred * enemy.speed, wall_rects):
+                        enemy.direction = preferred_dir
+                    else:
+                        # 回退到随机可行方向
+                        import random
+                        random_directions = [0, 1, 2, 3]
+                        random.shuffle(random_directions)
+                        for dir_idx in random_directions:
+                            ddx, ddy = directions[dir_idx]
+                            if can_move_rect(enemy.rect, ddx * enemy.speed, ddy * enemy.speed, wall_rects):
+                                enemy.direction = dir_idx
+                                break
 
     # 所有坦克执行移动 - 优化：避免创建生成器
     for tank in all_tanks:
