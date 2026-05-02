@@ -21,6 +21,7 @@ import time
 import sys
 import logging
 import gc
+import multiprocessing
 
 # 优化GC：降低频次，减少卡顿
 gc.disable()  # 禁用自动GC
@@ -940,10 +941,50 @@ def render_game(screen, players, enemies, bullets, explosions, score, candidate_
     draw_sidebar(candidate_tanks)
 
 
+def _start_metrics_window(q):
+    """Child process entry point — import-safe for spawn start method."""
+    try:
+        from metrics_window import run_metrics_window
+        run_metrics_window(q)
+    except Exception as exc:
+        logging.error("Metrics window crashed: %s", exc)
+
+
+def _build_metrics_payload(agent, survival_time, hybrid_wins_this_game):
+    STATE_SPACE_SIZE = 1728
+    return {
+        'games_played':     agent.games_played,
+        'exploration_rate': agent.q_agent.exploration_rate,
+        'q_table_coverage': len(agent.q_agent.q_table) / STATE_SPACE_SIZE,
+        'ga_generation':    agent.genetic_optimizer.generation,
+        'best_fitness':     agent.genetic_optimizer.best_fitness,
+        'ga_diversity':     agent.genetic_optimizer.get_population_diversity(),
+        'reward_weights':   dict(agent.reward_weights),
+        'survival_time':    survival_time,
+        'hybrid_wins':      hybrid_wins_this_game,
+        'player_wins':      1 - hybrid_wins_this_game,
+    }
+
+
 def main():
     clock = pygame.time.Clock()
     players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, wall_rects, enemy_timer, player_ais, enemy_ais, global_hybrid_agents = reset_game()
     game_state = 'playing'
+
+    # Metrics visualization window (separate process, optional)
+    _metrics_queue = None
+    _metrics_process = None
+    try:
+        _metrics_queue = multiprocessing.Queue(maxsize=50)
+        _metrics_process = multiprocessing.Process(
+            target=_start_metrics_window, args=(_metrics_queue,),
+            daemon=True, name='MetricsWindow')
+        _metrics_process.start()
+        logging.info("Metrics window started (PID %d)", _metrics_process.pid)
+    except Exception as exc:
+        logging.warning("Could not start metrics window: %s", exc)
+        _metrics_queue = None
+        _metrics_process = None
 
     # 固定时间步长配置
     PHYSICS_FPS = 60
@@ -1036,6 +1077,13 @@ def main():
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
 
+                    if _metrics_queue is not None and global_hybrid_agents:
+                        try:
+                            _metrics_queue.put_nowait(_build_metrics_payload(
+                                global_hybrid_agents[0], survival_time, game_stats['hybrid_wins']))
+                        except Exception:
+                            pass
+
                     # 手动触发GC，清理内存碎片
                     gc.collect()
 
@@ -1070,6 +1118,13 @@ def main():
                 }
                 for agent in global_hybrid_agents:
                     agent.evolve_before_new_game(game_stats)
+
+                if _metrics_queue is not None and global_hybrid_agents:
+                    try:
+                        _metrics_queue.put_nowait(_build_metrics_payload(
+                            global_hybrid_agents[0], survival_time, game_stats['hybrid_wins']))
+                    except Exception:
+                        pass
 
                     # 手动触发GC，清理内存碎片
                 gc.collect()
@@ -1126,6 +1181,13 @@ def main():
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)
 
+                    if _metrics_queue is not None and global_hybrid_agents:
+                        try:
+                            _metrics_queue.put_nowait(_build_metrics_payload(
+                                global_hybrid_agents[0], survival_time, game_stats['hybrid_wins']))
+                        except Exception:
+                            pass
+
                     # 手动触发GC，清理内存碎片
                     gc.collect()
                     players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, wall_rects, enemy_timer, player_ais, enemy_ais, global_hybrid_agents = reset_game(global_hybrid_agents)
@@ -1147,9 +1209,21 @@ def main():
         # 显示训练进度
         logging.info(f"\n=== 游戏完成 ===")
         logging.info(f"总游戏局数: {total_games + 1}")
-        
+
+        # Shut down metrics window
+        if _metrics_process is not None and _metrics_process.is_alive():
+            try:
+                if _metrics_queue is not None:
+                    _metrics_queue.put_nowait({'__shutdown__': True})
+            except Exception:
+                pass
+            _metrics_process.join(timeout=3.0)
+            if _metrics_process.is_alive():
+                _metrics_process.terminate()
+
         pygame.quit()
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
