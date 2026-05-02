@@ -25,11 +25,11 @@ SCORE_ENEMY = 100
 SCORE_BASE = 500
 
 PLAYER_SHOT_DELAY = 200  # 我方射击冷却时间200ms
-ENEMY_SHOT_DELAY = 300   # 敌方射击冷却时间300ms
+ENEMY_SHOT_DELAY = 100   # 敌方射击冷却时间300ms
 START_LIVES = 10  # 玩家坦克可以抗住10次射击
 EXPLOSION_DURATION = 8
-MAX_ENEMIES = 5  # 敌方坦克数量
-CANDIDATE_TANKS = 15  # 总候选坦克
+MAX_ENEMIES = 8  # 敌方坦克数量
+CANDIDATE_TANKS = 20  # 总候选坦克
 PLAYER_TANK_COUNT = 2  # 玩家AI坦克数量
 
 # Directions mapping

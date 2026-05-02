@@ -747,7 +747,9 @@ class QLearningAgent:
             self.add_experience(state, action, reward, next_state)
 
         last_state, last_action, _ = enemy_history[-1]
-        death_state = (last_state[0], last_state[1], 0, last_state[3], 1, 0, last_state[6])
+        # death_state: 距离近(0)、有障碍(1)、无盟友(0)、aligned保持原值
+        # 维度与8D状态对齐: (rel_x, rel_y, 0, direction, 1, 0, self_facing, aligned)
+        death_state = (last_state[0], last_state[1], 0, last_state[3], 1, 0, last_state[6], last_state[7])
         self.add_experience(last_state, last_action, -10, death_state)
 
         self.replay_experience()
@@ -949,11 +951,10 @@ class GeneticOptimizer:
                 individual[key] = max(lo, min(hi, individual[key] + random.gauss(0, sigma)))
         return individual
 
-    def evolve(self, game_stats_list):
-        """运行一代进化"""
-        # 评估适应度
-        for individual, stats in zip(self.population, game_stats_list):
-            self.evaluate_fitness(individual, stats)
+    def evolve(self, avg_stats):
+        """运行一代进化，所有个体用同一份平均统计评估，保证 fitness 可比"""
+        for individual in self.population:
+            self.evaluate_fitness(individual, avg_stats)
 
         # 排序
         self.population.sort(key=lambda x: x['fitness'], reverse=True)
@@ -1094,6 +1095,13 @@ class HybridAgent:
             if key in params:
                 self.reward_weights[key] = params[key]
 
+    def _average_stats(self, stats_list):
+        """将多局统计数据取平均，消除单局方差对 GA 评估的影响"""
+        if not stats_list:
+            return {}
+        keys = stats_list[0].keys()
+        return {k: sum(s.get(k, 0) for s in stats_list) / len(stats_list) for k in keys}
+
     def update_parameters(self):
         """从遗传优化器获取最新参数并应用"""
         params = self.genetic_optimizer.get_best_parameters()
@@ -1114,8 +1122,8 @@ class HybridAgent:
         self.games_played += 1  # ✅ 只在这里增加 games_played
 
         # 自适应探索率衰减：状态覆盖率低时保持较高探索
-        # 1728 = 3×3×3×4×2×2×4 (7维状态空间上限)
-        STATE_SPACE_SIZE = 1728
+        # 3456 = 3×3×3×4×2×2×4×2 (8维状态空间上限)
+        STATE_SPACE_SIZE = 3456
         coverage_ratio = len(self.q_agent.q_table) / STATE_SPACE_SIZE
         if coverage_ratio < 0.5:
             # 覆盖率不足50%时，衰减极慢（每局1%）
@@ -1144,9 +1152,10 @@ class HybridAgent:
             if not self.genetic_optimizer.population:
                 self.genetic_optimizer.initialize_population()
 
-            # 评估现有种群适应度(使用真实数据)
+            # 用 buffer 中所有已有数据的平均值评估，避免单局方差主导
+            avg_stats = self._average_stats(self.game_stats_buffer)
             for individual in self.genetic_optimizer.population:
-                self.genetic_optimizer.evaluate_fitness(individual, current_game_stats)
+                self.genetic_optimizer.evaluate_fitness(individual, avg_stats)
 
             # 低强度进化: 只对最优个体进行小幅度变异
             self.genetic_optimizer.population.sort(
@@ -1157,9 +1166,8 @@ class HybridAgent:
             elite_count = POPULATION_SIZE // 2
             elite_individuals = self.genetic_optimizer.population[:elite_count]
 
-            # 从精英生成新种群（低强度变异，复用 mutate()，幅度降至30%）
+            # 从精英生成新种群（低强度变异，幅度降至标准的25%）
             new_population = []
-            original_mutation_rate = MUTATION_RATE
             for elite in elite_individuals:
                 new_population.append(copy.deepcopy(elite))
                 mutated = copy.deepcopy(elite)
@@ -1214,7 +1222,8 @@ class HybridAgent:
             # 需要足够的数据来评估种群
             if len(self.game_stats_buffer) >= POPULATION_SIZE:
                 stats_to_evaluate = self.game_stats_buffer[:POPULATION_SIZE]
-                self.genetic_optimizer.evolve(stats_to_evaluate)
+                avg_stats = self._average_stats(stats_to_evaluate)
+                self.genetic_optimizer.evolve(avg_stats)
                 self.update_parameters()
                 # 保留剩余统计
                 self.game_stats_buffer = self.game_stats_buffer[POPULATION_SIZE:]

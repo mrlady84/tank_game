@@ -175,7 +175,8 @@ def draw_panel_qlearn(surf, rect, data, font_title, font_body):
 
 
 def draw_panel_ga(surf, rect, data, font_title, font_body):
-    _draw_panel_base(surf, rect, "GA Evolution", font_title)
+    gen_label = f"GA Evolution  (gen={data.ga_gen[-1] if data.ga_gen else 0})"
+    _draw_panel_base(surf, rect, gen_label, font_title)
     if not data.games:
         _no_data_text(surf, rect, font_body)
         return
