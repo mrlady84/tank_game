@@ -661,9 +661,10 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
 
             # 如果有上一步的状态和动作，记录经验
             if enemy.last_state is not None and enemy.last_action is not None:
-                # 读取并重置帧级事件标记
+                # 读取并重置帧级事件标记（先读后清）
                 killed_player = enemy.killed_player_this_frame
                 hit_player = enemy.hit_player_this_frame
+                straight_shot = enemy.straight_shot_this_frame
                 enemy.killed_player_this_frame = False
                 enemy.hit_player_this_frame = False
                 enemy.straight_shot_this_frame = False
@@ -679,6 +680,19 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 if hit_player and not killed_player:
                     reward += 5.0
 
+                # 直线射击奖励（修复：之前 reset 前未读取）
+                if straight_shot:
+                    reward += 0.3
+
+                # 对准射击塑形奖励：上一帧选了 ACTION_SHOOT 时，
+                # 根据上一帧状态的 aligned 位判断是否是有效射击决策
+                if enemy.last_action == ACTION_SHOOT:
+                    last_aligned = enemy.last_state[-1]  # 状态最后一维为 aligned
+                    if last_aligned:
+                        reward += 0.8   # 对准时射击，密集正奖励
+                    else:
+                        reward -= 0.2   # 未对准乱射，小惩罚
+
                 # 记录经验（仅存入 PER buffer，Q值更新由 replay_experience 统一处理）
                 new_state = enemy_hybrid.get_state(enemy, reference_player, wall_rects, enemies)
                 enemy_hybrid.add_experience(enemy.last_state, enemy.last_action, reward, new_state)
@@ -687,6 +701,17 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
             # 更新状态
             enemy.last_state = state
             enemy.last_action = action
+
+            # 冷却中屏蔽 ACTION_SHOOT，避免无效经验污染 Q-table
+            dx_player = reference_player.rect.centerx - enemy.rect.centerx
+            dy_player = reference_player.rect.centery - enemy.rect.centery
+            if abs(dx_player) > abs(dy_player):
+                preferred_dir = 1 if dx_player > 0 else 3
+            else:
+                preferred_dir = 2 if dy_player > 0 else 0
+
+            if action == ACTION_SHOOT and not enemy.can_shoot(current_time):
+                action = preferred_dir
 
             # 分支：射击动作 vs 移动动作（由 HybridAgent 自主决定）
             if action == ACTION_SHOOT:
@@ -700,20 +725,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                     bullets.append(shot)
             else:
                 # 移动动作（0-3）：方向选择 + 受阻回退
-                # 优化：添加直接追击逻辑
-                # 计算最佳追击方向
-                dx_player = reference_player.rect.centerx - enemy.rect.centerx
-                dy_player = reference_player.rect.centery - enemy.rect.centery
-
-                # 确定主要追击方向
-                if abs(dx_player) > abs(dy_player):
-                    # 水平方向追击
-                    preferred_dir = 1 if dx_player > 0 else 3  # 右或左
-                else:
-                    # 垂直方向追击
-                    preferred_dir = 2 if dy_player > 0 else 0  # 下或上
-
-                # 尝试优先使用Q-learning建议的方向，如果不行则使用追击方向
+                # preferred_dir 已在上方计算
                 directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 上、右、下、左
                 dx, dy = directions[action]
 
@@ -722,7 +734,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 if can_move_rect(enemy.rect, dx * enemy.speed, dy * enemy.speed, wall_rects):
                     enemy.direction = action
                 else:
-                    # 优化：优先尝试追击方向
+                    # 优先尝试追击方向
                     dx_preferred, dy_preferred = directions[preferred_dir]
                     if can_move_rect(enemy.rect, dx_preferred * enemy.speed, dy_preferred * enemy.speed, wall_rects):
                         enemy.direction = preferred_dir
@@ -843,7 +855,12 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                 explosions[write_idx] = explosions[read_idx]
             write_idx += 1
     del explosions[write_idx:]
-    
+
+    # 定期从 PER buffer 学习，不依赖敌人死亡事件
+    if performance_optimizer.frame_count % 20 == 0 and enemy_ais:
+        for agent in set(enemy_ais.values()):
+            agent.replay_experience()
+
     return 'playing', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, frame_enemies_killed, frame_player_damage
 
 

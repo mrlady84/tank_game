@@ -424,7 +424,18 @@ class PerformanceOptimizer:
         # 自身朝向 (4种): 0=上, 1=右, 2=下, 3=左
         self_facing = enemy.direction
 
-        return (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally, self_facing)
+        # 对准检测 (2种): 自身朝向是否对准玩家，射击有效范围内
+        align_tol = TILE_SIZE * 1.5
+        if self_facing == 0:
+            aligned = 1 if (dy < 0 and abs(dx) < align_tol) else 0
+        elif self_facing == 1:
+            aligned = 1 if (dx > 0 and abs(dy) < align_tol) else 0
+        elif self_facing == 2:
+            aligned = 1 if (dy > 0 and abs(dx) < align_tol) else 0
+        else:
+            aligned = 1 if (dx < 0 and abs(dy) < align_tol) else 0
+
+        return (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally, self_facing, aligned)
 
     def _compute_reward(self, enemy, action, target, all_enemies, roles, walls,
                        killed_player=False, took_damage=False, reward_weights=None):
@@ -552,13 +563,14 @@ class QLearningAgent:
         ε (exploration_rate): 探索率，ε-贪心策略的随机探索概率
     
     状态表示:
-        (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally, self_facing)
+        (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally, self_facing, aligned)
         - rel_x/rel_y: 目标相对位置(0=左/上, 1=同行/列, 2=右/下)
         - distance_cat: 距离分类(0<100px, 1<250px, 2>=250px)
         - direction: 目标方向(0上, 1右, 2下, 3左)
         - has_obstacle: 是否有障碍物阻挡
         - has_ally: 150px内是否有盟友
         - self_facing: 自身朝向(0上, 1右, 2下, 3左)
+        - aligned: 自身朝向是否对准玩家射击范围(0/1)
     
     优化机制:
         - LRU淘汰: Q-table超过5000状态时淘汰最久未访问的
@@ -626,17 +638,18 @@ class QLearningAgent:
             return self.get_best_action(state)
 
     def get_best_action(self, state):
-        """获取当前状态下Q值最大的动作"""
+        """获取当前状态下Q值最大的动作，随机打破平局"""
         values = self.q_table[state]
         self._record_access(state)
 
-        max_idx = 0
         max_val = values[0]
         for i in range(1, NUM_ACTIONS):
             if values[i] > max_val:
                 max_val = values[i]
-                max_idx = i
-        return max_idx
+
+        # 随机打破平局：初期所有Q值为0时避免永远选action 0
+        best = [i for i in range(NUM_ACTIONS) if values[i] == max_val]
+        return random.choice(best)
 
     def update_q_value(self, state, action, reward, next_state):
         """

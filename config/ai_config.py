@@ -3,7 +3,7 @@ AI system configuration constants
 """
 
 # Q-Learning constants
-LEARNING_RATE = 0.2
+LEARNING_RATE = 0.3
 DISCOUNT_FACTOR = 0.95
 EXPLORATION_RATE = 0.3
 EXPLORATION_DECAY = 0.999
