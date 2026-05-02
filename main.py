@@ -410,8 +410,9 @@ def handle_enemy_collision(bullet, bullet_rect, enemies, explosions, bullets, sc
                 bullets.remove(bullet)
 
             # 从敌人死亡前学习
-            if enemy.learning_history is not None and q_agent_instance:
+            if enemy.learning_history and q_agent_instance:
                 q_agent_instance.learn_from_death(enemy.learning_history)
+                enemy.learning_history.clear()
 
             enemies.remove(enemy)
 
@@ -435,8 +436,8 @@ def handle_enemy_collision(bullet, bullet_rect, enemies, explosions, bullets, sc
                         enemy_ais[new_enemy] = global_hybrid_agents[agent_index]
                     candidate_tanks -= 1
 
-            return True, score, candidate_tanks
-    return False, score, candidate_tanks
+            return True, score, candidate_tanks, 1
+    return False, score, candidate_tanks, 0
 
 
 def handle_brick_collision(bullet, bullet_rect, brick_tiles, wall_rects, explosions, bullets, score):
@@ -576,7 +577,7 @@ def reset_game(global_hybrid_agents=None):
 
 def update_physics(players, enemies, bullets, explosions, wall_rects,
                    brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                   current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, ai_learning_enabled, player_ais, enemy_ais, global_hybrid_agents):
+                   current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents):
     """
     执行固定时间步长的物理模拟更新
     
@@ -613,7 +614,6 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
         player_ai_timer: 玩家AI决策计时器
         enemy_ai_timer: 敌方AI决策计时器
         enemy_roles_cache: 敌方角色缓存
-        ai_learning_enabled: 是否启用AI学习
         player_ais: 玩家AI控制器映射 {Tank: AutoAI}
         enemy_ais: 敌方AI控制器映射 {Tank: HybridAgent}
     
@@ -623,6 +623,8 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
         game_state: 'playing' | 'game_over' | 'eagle_destroyed'
     """
     reference_player = players[0] if players else None
+    frame_enemies_killed = 0
+    frame_player_damage = 0
 
     # 预先计算所有坦克列表（只创建一次）
     all_tanks = players + enemies
@@ -662,6 +664,17 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
     if current_time - enemy_ai_timer > 100:
         enemy_ai_timer = current_time
 
+        # 分配战术角色（aggressor/flanker/suppressor）
+        shared_hybrid = None
+        if enemies and reference_player:
+            for e in enemies:
+                h = enemy_ais.get(e)
+                if h:
+                    shared_hybrid = h
+                    break
+        if shared_hybrid and reference_player:
+            enemy_roles_cache = shared_hybrid.assign_roles(enemies, reference_player)
+
         # 为每个敌方坦克执行HybridAgent决策
         for enemy in enemies:
             enemy_hybrid = enemy_ais.get(enemy)
@@ -676,44 +689,29 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
 
             # 如果有上一步的状态和动作，记录经验
             if enemy.last_state is not None and enemy.last_action is not None:
-                # 计算奖励 - 优化：更激进的追击奖励
-                reward = 0.1  # 基础生存奖励
+                # 读取并重置帧级事件标记
+                killed_player = enemy.killed_player_this_frame
+                hit_player = enemy.hit_player_this_frame
+                enemy.killed_player_this_frame = False
+                enemy.hit_player_this_frame = False
+                enemy.straight_shot_this_frame = False
 
-                # 检查是否接近玩家
-                dist_to_player = math.hypot(
-                    enemy.rect.centerx - reference_player.rect.centerx,
-                    enemy.rect.centery - reference_player.rect.centery
+                # 使用协同奖励系统（含角色距离奖励、视野奖励、团队协调）
+                reward = enemy_hybrid.get_cooperative_reward(
+                    enemy, enemy.last_action, reference_player, enemies,
+                    enemy_roles_cache, wall_rects,
+                    killed_player=killed_player,
+                    took_damage=False
                 )
-
-                # 优化：加大接近奖励，鼓励追击
-                if dist_to_player < 80:
-                    reward += 2.0  # 近距离高奖励 (原1.0)
-                elif dist_to_player < 150:
-                    reward += 1.5  # 中距离奖励 (新增)
-                elif dist_to_player < 250:
-                    reward += 0.5  # 较近距离奖励 (新增)
-                elif dist_to_player > 400:
-                    reward -= 0.5  # 远离惩罚加大 (原0.1)
-
-                # 击中玩家奖励
-                if enemy.hit_player_this_frame:
-                    reward += 5.0  # 击中玩家 +5
-                    enemy.hit_player_this_frame = False  # 重置标记
-
-                # 击杀玩家奖励
-                if enemy.killed_player_this_frame:
-                    reward += 15.0  # 击杀玩家 +15
-                    enemy.killed_player_this_frame = False  # 重置标记
-
-                # 直线射击奖励
-                if enemy.straight_shot_this_frame:
-                    reward += 2.0  # 直线射击 +2
-                    enemy.straight_shot_this_frame = False  # 重置标记
+                # 击中奖励叠加（帧级事件，不在协同奖励里）
+                if hit_player and not killed_player:
+                    reward += 5.0
 
                 # 记录经验
                 new_state = enemy_hybrid.get_state(enemy, reference_player, wall_rects, enemies)
                 enemy_hybrid.add_experience(enemy.last_state, enemy.last_action, reward, new_state)
                 enemy_hybrid.update_q_value(enemy.last_state, enemy.last_action, reward, new_state)
+                enemy.learning_history.append((enemy.last_state, enemy.last_action, reward))
 
             # 更新状态
             enemy.last_state = state
@@ -830,10 +828,11 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
             continue
 
         if bullet.owner == 'player':
-            hit_enemy, score, candidate_tanks = handle_enemy_collision(
+            hit_enemy, score, candidate_tanks, killed = handle_enemy_collision(
                 bullet, path_rect, enemies, explosions, bullets, score, candidate_tanks, players, q_agent, enemy_ais, global_hybrid_agents
             )
             if hit_enemy:
+                frame_enemies_killed += killed
                 # 敌人已从enemies列表中移除（见handle_enemy_collision）
                 continue
         else:
@@ -843,6 +842,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                     explosions.append(Explosion(player.rect.centerx, player.rect.centery))
                     bullets_to_remove.append(bullet)
                     player.hit_points -= 1
+                    frame_player_damage += 1
 
                     # 标记击中玩家的敌方坦克（用于AI奖励）
                     if hasattr(bullet, 'owner_tank') and bullet.owner_tank and bullet.owner_tank in enemies:
@@ -854,7 +854,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                         players.remove(player)  # 玩家HP为0时从列表移除
 
                     if not players:
-                        return 'game_over', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache
+                        return 'game_over', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, frame_enemies_killed, frame_player_damage
 
                     hit_player = True
                     break
@@ -872,7 +872,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                     
                     # 老鹰被打掉，立即重开一局
                     logging.info("🦅 老鹰被摧毁！立即重开一局")
-                    return 'eagle_destroyed', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache
+                    return 'eagle_destroyed', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, frame_enemies_killed, frame_player_damage
 
     # 批量移除子弹 - 优化：使用集合加速查找
     bullets_to_remove_set = set(bullets_to_remove)
@@ -888,7 +888,7 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
             write_idx += 1
     del explosions[write_idx:]
     
-    return 'playing', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache
+    return 'playing', score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, frame_enemies_killed, frame_player_damage
 
 
 def render_game(screen, players, enemies, bullets, explosions, score, candidate_tanks, brick_tiles, steel_tiles, grass_tiles, base_tiles, player_wins=0, enemy_wins=0):
@@ -956,7 +956,6 @@ def main():
     player_ai_timer = 0
     enemy_ai_timer = 0
     enemy_roles_cache = {}  # 缓存角色分配结果
-    ai_learning_enabled = False  # 默认关闭学习模式，提升性能
 
     # Game statistics
     game_start_time = pygame.time.get_ticks()
@@ -997,11 +996,13 @@ def main():
             max_updates = 5  # 每帧最多更新5次物理
             update_count = 0
             while accumulator >= physics_step and game_state == 'playing' and update_count < max_updates:
-                game_state, score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache = update_physics(
+                game_state, score, candidate_tanks, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, delta_killed, delta_damage = update_physics(
                     players, enemies, bullets, explosions, wall_rects,
                     brick_tiles, steel_tiles, base_tiles, score, candidate_tanks,
-                    current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, ai_learning_enabled, player_ais, enemy_ais, global_hybrid_agents
+                    current_time, q_agent, enemy_timer, player_ai_timer, enemy_ai_timer, enemy_roles_cache, player_ais, enemy_ais, global_hybrid_agents
                 )
+                enemies_killed += delta_killed
+                player_damage_taken += delta_damage
                 accumulator -= physics_step
                 update_count += 1
             
@@ -1028,10 +1029,10 @@ def main():
                         'player_damage': player_damage_taken,
                         'team_coordination': team_coordination_score,
                         # HybridAgent视角数据：玩家胜利说明HybridAgent失败
-                        'hybrid_wins': 0,  # HybridAgent失败标记
-                        'hybrid_kills': enemies_killed,  # HybridAgent击杀数（等于玩家击杀数）
-                        'player_killed': 0,  # 玩家还活着
-                        'damage_inflicted': 0  # HybridAgent造成的伤害（玩家未受伤）
+                        'hybrid_wins': 0,
+                        'hybrid_kills': 0,  # 玩家击杀了敌人，不是HybridAgent
+                        'player_killed': 0,
+                        'damage_inflicted': player_damage_taken
                     }
                     for agent in global_hybrid_agents:
                         agent.evolve_before_new_game(game_stats)

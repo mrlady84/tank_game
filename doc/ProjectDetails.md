@@ -245,10 +245,12 @@ Where:
 
 **Fitness Function**:
 ```
-Fitness = survival_time × 0.2
-        + enemies_killed × 8
-        - player_damage × 1.5
-        + team_coordination × 3
+Fitness = hybrid_wins       × 100.0   # HybridAgent wins: highest priority
+        + player_killed     × 50.0    # Killed all players
+        + damage_inflicted  × 0.5     # Damage dealt to players
+        + hybrid_kills      × 5.0     # Enemy kills by HybridAgent
+        + survival_time     × 0.1     # Game duration
+        + team_coordination × 0.5     # Team coordination score
 ```
 
 ---

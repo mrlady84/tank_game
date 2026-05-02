@@ -324,16 +324,18 @@ class PerformanceOptimizer:
             return state
 
     def get_cached_reward(self, enemy, action, target, all_enemies, roles, walls,
-                         killed_player=False, took_damage=False, force_update=False):
+                         killed_player=False, took_damage=False, force_update=False,
+                         reward_weights=None):
         """获取缓存的奖励，如果不存在则计算 - 优化键设计"""
-        # 使用当前的帧组合作为缓存键
         current_frame_group = self.frame_count // self.cache_timeout
 
-        # 改进的缓存键：使用网格位置替代id
         enemy_grid_x = enemy.rect.centerx // TILE_SIZE
         enemy_grid_y = enemy.rect.centery // TILE_SIZE
         target_grid_x = target.rect.centerx // TILE_SIZE
         target_grid_y = target.rect.centery // TILE_SIZE
+
+        # 权重哈希：不同权重个体不能共享缓存
+        weights_key = tuple(sorted(reward_weights.items())) if reward_weights else ()
 
         cache_key = (
             enemy_grid_x,
@@ -343,7 +345,8 @@ class PerformanceOptimizer:
             took_damage,
             target_grid_x,
             target_grid_y,
-            current_frame_group
+            current_frame_group,
+            weights_key
         )
 
         if not force_update and cache_key in self.reward_cache:
@@ -352,7 +355,7 @@ class PerformanceOptimizer:
         else:
             self.cache_misses += 1
             reward = self._compute_reward(enemy, action, target, all_enemies, roles, walls,
-                                        killed_player, took_damage)
+                                        killed_player, took_damage, reward_weights)
             self.reward_cache[cache_key] = reward
             return reward
 
@@ -417,12 +420,23 @@ class PerformanceOptimizer:
                         has_ally = 1
                         break
 
-        return (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally)
+        # 自身朝向 (4种): 0=上, 1=右, 2=下, 3=左
+        self_facing = enemy.direction
+
+        return (rel_x, rel_y, distance_cat, direction, has_obstacle, has_ally, self_facing)
 
     def _compute_reward(self, enemy, action, target, all_enemies, roles, walls,
-                       killed_player=False, took_damage=False):
-        """实际计算奖励（优化版 - 避免重复三角函数计算）"""
-        reward = 0.05  # 基础生存奖励
+                       killed_player=False, took_damage=False, reward_weights=None):
+        """实际计算奖励，奖励权重由遗传算法优化"""
+        if reward_weights is None:
+            reward_weights = {}
+
+        survival_bonus = reward_weights.get('survival_bonus', DEFAULT_SURVIVAL_BONUS)
+        kill_reward    = reward_weights.get('kill_reward',    DEFAULT_KILL_REWARD)
+        distance_scale = reward_weights.get('distance_scale', DEFAULT_DISTANCE_SCALE)
+        team_bonus     = reward_weights.get('team_bonus',     DEFAULT_TEAM_BONUS)
+
+        reward = survival_bonus
 
         enemy_x, enemy_y = enemy.rect.centerx, enemy.rect.centery
         target_x, target_y = target.rect.centerx, target.rect.centery
@@ -430,20 +444,20 @@ class PerformanceOptimizer:
 
         # 击杀/受伤奖励
         if killed_player:
-            reward += 15.0
+            reward += kill_reward
         if took_damage:
             reward -= 3.0
 
-        # 距离奖励 - 使用LUT查表替代if-elif链
+        # 距离奖励 - 使用LUT查表，乘以遗传算法优化的缩放系数
         role = roles.get(enemy, 'suppressor')
-        reward += self._get_distance_reward(distance_to_target, role)
-        
+        reward += self._get_distance_reward(distance_to_target, role) * distance_scale
+
         # flanker额外奖励：保持45度角
         if role == 'flanker':
             dx = abs(enemy_x - target_x)
             dy = abs(enemy_y - target_y)
             if abs(dx - dy) < 50:
-                reward += 0.5
+                reward += 0.5 * distance_scale
 
         # 视野奖励
         has_line_of_sight = True
@@ -456,32 +470,28 @@ class PerformanceOptimizer:
         if has_line_of_sight and distance_to_target < 250:
             reward += 0.2
 
-        # 团队协调 - 优化：一次遍历，使用距离平方避免三角函数
+        # 团队协调 - 一次遍历，使用距离平方避免三角函数
         nearby_allies = 0
         too_close_allies = 0
-        
-        # 预计算距离平方阈值（避免sqrt）
-        nearby_dist_sq_lower = 80 * 80   # 6400
-        nearby_dist_sq_upper = 200 * 200  # 40000
-        too_close_dist_sq = 60 * 60       # 3600
+
+        nearby_dist_sq_lower = 80 * 80
+        nearby_dist_sq_upper = 200 * 200
+        too_close_dist_sq = 60 * 60
 
         for other in all_enemies:
             if other != enemy:
-                # 使用距离平方，避免math.hypot
                 dx = other.rect.centerx - enemy_x
                 dy = other.rect.centery - enemy_y
                 dist_sq = dx * dx + dy * dy
 
-                # 团队协调检查
                 if nearby_dist_sq_lower < dist_sq < nearby_dist_sq_upper:
                     nearby_allies += 1
 
-                # 聚集惩罚检查
                 if dist_sq < too_close_dist_sq:
                     too_close_allies += 1
 
         if nearby_allies > 0:
-            reward += min(nearby_allies * 0.15, 0.5)
+            reward += min(nearby_allies * 0.15, team_bonus)
 
         if too_close_allies > 0:
             reward -= too_close_allies * 0.3
@@ -726,7 +736,8 @@ class QLearningAgent:
 
         # 最后一个状态获得死亡惩罚
         last_state, last_action, _ = enemy_history[-1]
-        death_state = (last_state[0], last_state[1], 0, last_state[3], 1, 0)
+        # 死亡状态：距离近(0)、有障碍(1)、无盟友(0)，朝向保持不变
+        death_state = (last_state[0], last_state[1], 0, last_state[3], 1, 0, last_state[6])
         self.add_experience(last_state, last_action, -10, death_state)
         self.update_q_value(last_state, last_action, -10, death_state)
 
@@ -813,16 +824,12 @@ class QLearningAgent:
 
         return roles
 
-    def get_cooperative_reward(self, enemy, action, target, all_enemies, roles, walls=None, 
-                              killed_player=False, took_damage=False):
-        """
-        改进的协同奖励系统
-        添加击杀/受伤动态奖励，解决奖励矛盾
-        现在使用缓存优化性能
-        """
+    def get_cooperative_reward(self, enemy, action, target, all_enemies, roles, walls=None,
+                              killed_player=False, took_damage=False, reward_weights=None):
+        """协同奖励系统，奖励权重由遗传算法优化后注入"""
         return performance_optimizer.get_cached_reward(
             enemy, action, target, all_enemies, roles, walls,
-            killed_player, took_damage
+            killed_player, took_damage, reward_weights=reward_weights
         )
 
 
@@ -833,7 +840,16 @@ class QLearningAgent:
 
 
 class GeneticOptimizer:
-    """遗传算法优化Q-learning参数"""
+    """遗传算法优化奖励权重"""
+
+    # 每个基因的合法范围，用于变异裁剪
+    _GENE_RANGES = {
+        'kill_reward':    (5.0,  50.0),
+        'hit_reward':     (1.0,  20.0),
+        'distance_scale': (0.1,   5.0),
+        'team_bonus':     (0.0,   2.0),
+        'survival_bonus': (0.0,   0.5),
+    }
 
     def __init__(self):
         self.population = []
@@ -843,49 +859,42 @@ class GeneticOptimizer:
         self.initialize_population()
 
     def initialize_population(self):
-        """初始化种群"""
+        """初始化种群，基因为奖励权重"""
         for _ in range(POPULATION_SIZE):
             individual = {
-                'learning_rate': random.uniform(0.1, 0.3),
-                'discount_factor': random.uniform(0.9, 0.99),
-                'exploration_rate': random.uniform(0.1, 0.4),
+                'kill_reward':    random.uniform(10.0, 30.0),
+                'hit_reward':     random.uniform(2.0,  10.0),
+                'distance_scale': random.uniform(0.5,   3.0),
+                'team_bonus':     random.uniform(0.1,   1.0),
+                'survival_bonus': random.uniform(0.01,  0.2),
                 'fitness': 0
             }
             self.population.append(individual)
 
     def evaluate_fitness(self, individual, game_stats):
         """
-        评估适应度 - 从HybridAgent（敌方AI）视角评估表现
-        
-        适应度函数设计原则：
-        - HybridAgent获胜是最高优先级（hybrid_wins * 100）
-        - 击杀玩家次之（player_killed * 50）
-        - 造成伤害和击杀敌人作为辅助指标
-        - 存活时间和团队协调作为低优先级指标
-        
-        Args:
-            individual: 遗传算法个体
-            game_stats: 游戏统计数据（从HybridAgent视角收集）
-            
-        Returns:
-            float: 适应度分数，越高表示HybridAgent表现越好
-        """
-        # HybridAgent视角数据
-        hybrid_wins = game_stats.get('hybrid_wins', 0)      # HybridAgent是否获胜
-        player_killed = game_stats.get('player_killed', 0)  # HybridAgent是否击杀玩家
-        damage_inflicted = game_stats.get('damage_inflicted', 0)  # HybridAgent造成的伤害
-        hybrid_kills = game_stats.get('hybrid_kills', 0)    # HybridAgent击杀数
-        survival_time = game_stats.get('survival_time', 0)  # 游戏存活时间
-        team_coordination = game_stats.get('team_coordination', 0)  # 团队协调分数
+        连续适应度函数 - 以伤害比例为主信号，消除二元胜负主导问题。
 
-        # 从HybridAgent视角评估适应度 - HybridAgent获胜是最高优先级
+        damage_ratio = damage_inflicted / PLAYER_MAX_HP  (0~1 连续)
+        survival_ratio = survival_time / FITNESS_MAX_GAME_S  (0~1 连续)
+        win_bonus = 1.0 if hybrid_wins else 0.0
+
+        fitness = damage_ratio*60 + win_bonus*30 + survival_ratio*10 + team_coordination*0.5
+        """
+        damage_inflicted  = game_stats.get('damage_inflicted', 0)
+        hybrid_wins       = game_stats.get('hybrid_wins', 0)
+        survival_time     = game_stats.get('survival_time', 0)
+        team_coordination = game_stats.get('team_coordination', 0)
+
+        damage_ratio   = min(damage_inflicted / PLAYER_MAX_HP, 1.0)
+        survival_ratio = min(survival_time / FITNESS_MAX_GAME_S, 1.0)
+        win_bonus      = 1.0 if hybrid_wins else 0.0
+
         fitness = (
-            hybrid_wins * 100.0 +      # HybridAgent获胜：最高奖励
-            player_killed * 50.0 +     # 击杀玩家：高奖励
-            damage_inflicted * 0.5 +   # 造成伤害：中等奖励
-            hybrid_kills * 5.0 +       # 击杀敌人：低奖励
-            survival_time * 0.1 +      # 存活时间：低奖励
-            team_coordination * 0.5    # 团队协调：低奖励
+            damage_ratio   * 60.0 +
+            win_bonus      * 30.0 +
+            survival_ratio * 10.0 +
+            team_coordination * 0.5
         )
 
         individual['fitness'] = fitness
@@ -912,12 +921,11 @@ class GeneticOptimizer:
         return child
 
     def mutate(self, individual):
-        """高斯变异"""
-        for key in individual:
-            if key != 'fitness' and random.random() < MUTATION_RATE:
-                if key in ['learning_rate', 'discount_factor', 'exploration_rate']:
-                    individual[key] = max(0.01, min(1.0, individual[key] + random.gauss(0, 0.03)))
-
+        """高斯变异，按各基因范围裁剪"""
+        for key, (lo, hi) in self._GENE_RANGES.items():
+            if key in individual and random.random() < MUTATION_RATE:
+                sigma = (hi - lo) * 0.1
+                individual[key] = max(lo, min(hi, individual[key] + random.gauss(0, sigma)))
         return individual
 
     def evolve(self, game_stats_list):
@@ -965,9 +973,17 @@ class HybridAgent:
         self.q_agent = QLearningAgent()
         self.genetic_optimizer = GeneticOptimizer()
         self.game_stats_buffer = []
-        self.evolution_threshold = 10  # 每 10 局进化一次
+        self.evolution_threshold = 10
         self.games_played = 0
         self.model_file = model_file
+        # 奖励权重默认值，由遗传算法进化后更新
+        self.reward_weights = {
+            'kill_reward':    DEFAULT_KILL_REWARD,
+            'hit_reward':     DEFAULT_HIT_REWARD,
+            'distance_scale': DEFAULT_DISTANCE_SCALE,
+            'team_bonus':     DEFAULT_TEAM_BONUS,
+            'survival_bonus': DEFAULT_SURVIVAL_BONUS,
+        }
         self.current_params = self.genetic_optimizer.get_best_parameters()
 
         # 应用初始参数
@@ -1022,21 +1038,11 @@ class HybridAgent:
             logging.error(f"加载模型失败: {e}")
 
     def _apply_parameters(self, params):
-        """
-        安全地应用参数，只影响当前实例
-        不修改全局变量
-        注意: 探索率已在evolve_before_new_game中衰减，此处不再重复衰减
-        """
-        self.q_agent.learning_rate = params.get('learning_rate', LEARNING_RATE)
-        self.q_agent.discount_factor = params.get('discount_factor', DISCOUNT_FACTOR)
-        # 探索率已在evolve_before_new_game中衰减，直接使用当前值
-        # 但如果params中有新的exploration_rate，则使用它作为基础值
-        if 'exploration_rate' in params:
-            # 使用遗传算法优化的探索率(不应用衰减公式)
-            self.q_agent.exploration_rate = max(
-                MIN_EXPLORATION_RATE,
-                params['exploration_rate']
-            )
+        """将遗传算法进化出的奖励权重存入实例，供奖励计算使用"""
+        gene_keys = ('kill_reward', 'hit_reward', 'distance_scale', 'team_bonus', 'survival_bonus')
+        for key in gene_keys:
+            if key in params:
+                self.reward_weights[key] = params[key]
 
     def update_parameters(self):
         """从遗传优化器获取最新参数并应用"""
@@ -1092,28 +1098,23 @@ class HybridAgent:
             elite_count = POPULATION_SIZE // 2
             elite_individuals = self.genetic_optimizer.population[:elite_count]
 
-            # 从精英生成新种群(低强度变异)
+            # 从精英生成新种群（低强度变异，复用 mutate()，幅度降至30%）
             new_population = []
+            original_mutation_rate = MUTATION_RATE
             for elite in elite_individuals:
-                # 添加原样复制
                 new_population.append(copy.deepcopy(elite))
-
-                # 生成一个低强度变异版本
                 mutated = copy.deepcopy(elite)
-                # 变异幅度降低到原来的30%
-                for key in mutated:
-                    if key != 'fitness' and random.random() < MUTATION_RATE * 0.3:
-                        if key == 'learning_rate':
-                            mutated[key] = max(0.01, min(1.0, mutated[key] + random.gauss(0, 0.01)))
-                        elif key == 'discount_factor':
-                            mutated[key] = max(0.5, min(0.99, mutated[key] + random.gauss(0, 0.01)))
-                        elif key == 'exploration_rate':
-                            mutated[key] = max(MIN_EXPLORATION_RATE, min(1.0, mutated[key] + random.gauss(0, 0.02)))
+                # 临时降低变异率到30%，通过随机门控实现
+                for key, (lo, hi) in self.genetic_optimizer._GENE_RANGES.items():
+                    if key in mutated and random.random() < MUTATION_RATE * 0.3:
+                        sigma = (hi - lo) * 0.05  # 幅度也缩小到标准的50%
+                        mutated[key] = max(lo, min(hi, mutated[key] + random.gauss(0, sigma)))
                 new_population.append(mutated)
 
             # 填充剩余种群
             while len(new_population) < POPULATION_SIZE:
-                parent1, parent2 = self.genetic_optimizer.tournament_select(2)
+                parent1 = self.genetic_optimizer.select_parent()
+                parent2 = self.genetic_optimizer.select_parent()
                 child = self.genetic_optimizer.crossover(parent1, parent2)
                 self.genetic_optimizer.mutate(child)
                 new_population.append(child)
@@ -1131,10 +1132,12 @@ class HybridAgent:
             self.genetic_optimizer.generation += 1
             self.update_parameters()
 
+            best = self.genetic_optimizer.best_individual
             logging.info(f"🌱 轻量进化 - 第{self.genetic_optimizer.generation}代 (历史第{self.games_played}局后, 真实数据{real_data_count}局)")
-            logging.info(f"   最佳参数: 学习率={self.genetic_optimizer.best_individual['learning_rate']:.3f}, "
-                        f"折扣={self.genetic_optimizer.best_individual['discount_factor']:.3f}, "
-                        f"探索={self.genetic_optimizer.best_individual['exploration_rate']:.3f}")
+            logging.info(f"   最佳权重: kill={best.get('kill_reward', 0):.1f}, "
+                        f"hit={best.get('hit_reward', 0):.1f}, "
+                        f"dist_scale={best.get('distance_scale', 0):.2f}, "
+                        f"team={best.get('team_bonus', 0):.2f}")
             logging.info(f"   最佳适应度: {self.genetic_optimizer.best_fitness:.2f}")
 
             # 保存模型
@@ -1153,10 +1156,13 @@ class HybridAgent:
                 # ✅ 进化完成后，自动保存模型到本地文件
                 self.save_checkpoint()
 
+                best = self.genetic_optimizer.best_individual
                 logging.info(f"🧬 AI模型进化完成 - 第{self.genetic_optimizer.generation}代 (历史第{self.games_played}局后)")
-                logging.info(f"   最佳参数: 学习率={self.genetic_optimizer.best_individual['learning_rate']:.3f}, "
-                            f"折扣={self.genetic_optimizer.best_individual['discount_factor']:.3f}, "
-                            f"探索={self.genetic_optimizer.best_individual['exploration_rate']:.3f}")
+                logging.info(f"   最佳权重: kill={best.get('kill_reward', 0):.1f}, "
+                            f"hit={best.get('hit_reward', 0):.1f}, "
+                            f"dist_scale={best.get('distance_scale', 0):.2f}, "
+                            f"team={best.get('team_bonus', 0):.2f}, "
+                            f"survival={best.get('survival_bonus', 0):.3f}")
                 logging.info(f"   最佳适应度: {self.genetic_optimizer.best_fitness:.2f}")
                 logging.info(f"   真实数据: {real_data_count}局")
             else:
@@ -1188,7 +1194,8 @@ class HybridAgent:
                               killed_player=False, took_damage=False):
         return self.q_agent.get_cooperative_reward(
             enemy, action, target, all_enemies, roles, walls,
-            killed_player=killed_player, took_damage=took_damage
+            killed_player=killed_player, took_damage=took_damage,
+            reward_weights=self.reward_weights
         )
 
     # save_q_table 已删除：已被save_checkpoint完全替代

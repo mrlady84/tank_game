@@ -35,6 +35,7 @@ class TestPerformance(unittest.TestCase):
         class MockTank:
             def __init__(self, x, y):
                 self.rect = type('Rect', (), {'centerx': x, 'centery': y})()
+                self.direction = 0
 
         enemy = MockTank(100, 100)
         target = MockTank(200, 200)
