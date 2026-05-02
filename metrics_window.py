@@ -60,6 +60,7 @@ class MetricsData:
         self.best_fitness = deque(maxlen=MAX_HISTORY)
         self.ga_diversity = deque(maxlen=MAX_HISTORY)
         self.surv_times   = deque(maxlen=MAX_HISTORY)
+        self.damage_hits  = deque(maxlen=MAX_HISTORY)
         self.reward_weights = {}
         self.player_wins_total = 0
         self.hybrid_wins_total = 0
@@ -68,12 +69,13 @@ class MetricsData:
         g = payload.get('games_played', 0)
         self.games.append(g)
         self.epsilon.append(payload.get('exploration_rate', 0.0))
-        self.q_coverage.append(payload.get('q_table_coverage', 0.0) * 100.0)
+        self.q_coverage.append(payload.get('q_table_coverage', 0.0))
         self.ga_gen.append(payload.get('ga_generation', 0))
         raw_fit = payload.get('best_fitness', 0.0)
         self.best_fitness.append(max(raw_fit, 0.0) if raw_fit > -1e9 else 0.0)
-        self.ga_diversity.append(payload.get('ga_diversity', 0.0))
+        self.ga_diversity.append(payload.get('ga_diversity', 0.0) * 100.0)
         self.surv_times.append(payload.get('survival_time', 0.0))
+        self.damage_hits.append(float(payload.get('damage_inflicted', 0)))
         if payload.get('reward_weights'):
             self.reward_weights = payload['reward_weights']
         self.player_wins_total += payload.get('player_wins', 0)
@@ -169,7 +171,7 @@ def draw_panel_qlearn(surf, rect, data, font_title, font_body):
     _line_chart(surf, rect,
                 [data.epsilon, data.q_coverage],
                 [COLORS['epsilon'], COLORS['coverage']],
-                [f"ε={data.epsilon[-1]:.3f}", f"cov={data.q_coverage[-1]:.1f}%"])
+                [f"ε={data.epsilon[-1]:.3f}", f"cov={data.q_coverage[-1]:.2f}"])
 
 
 def draw_panel_ga(surf, rect, data, font_title, font_body):
@@ -180,7 +182,7 @@ def draw_panel_ga(surf, rect, data, font_title, font_body):
     _line_chart(surf, rect,
                 [data.best_fitness, data.ga_diversity],
                 [COLORS['fitness'], COLORS['diversity']],
-                [f"fit={data.best_fitness[-1]:.1f}", f"div={data.ga_diversity[-1]:.2f}"])
+                [f"fit={data.best_fitness[-1]:.1f}", f"div×100={data.ga_diversity[-1]:.1f}"])
 
 
 def draw_panel_weights(surf, rect, data, font_title, font_body):
@@ -261,14 +263,19 @@ def draw_panel_stats(surf, rect, data, font_title, font_body):
     total_lbl = font_body.render(f"Total games: {total}", True, COLORS['text'])
     surf.blit(total_lbl, (bar_x, bar_y2 + bar_h + 8))
 
-    # Survival time line chart
+    # Survival time + damage hits line chart
     surv_rect = pygame.Rect(rect.x, bar_y2 + bar_h + 30, rect.w, rect.h - (bar_y2 + bar_h + 30 - rect.y))
+    series, colors_s, labels_s = [], [], []
     if len(data.surv_times) >= 2:
-        _line_chart(surf, surv_rect,
-                    [data.surv_times],
-                    [COLORS['surv_time']],
-                    [f"surv={data.surv_times[-1]:.1f}s"],
-                    title_h=0, padding=28)
+        series.append(data.surv_times)
+        colors_s.append(COLORS['surv_time'])
+        labels_s.append(f"dur={data.surv_times[-1]:.1f}s")
+    if len(data.damage_hits) >= 2:
+        series.append(data.damage_hits)
+        colors_s.append(COLORS['kill'])
+        labels_s.append(f"hits={int(data.damage_hits[-1])}")
+    if series:
+        _line_chart(surf, surv_rect, series, colors_s, labels_s, title_h=0, padding=28)
 
 
 class MetricsWindow:

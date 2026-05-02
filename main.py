@@ -51,6 +51,7 @@ except ModuleNotFoundError:
 
 from tank_ai import can_move_rect, performance_monitor, performance_optimizer, HybridAgent, AutoAI, has_clear_line, ACTION_SHOOT
 from config.game_config import *
+from config.ai_config import DEFAULT_HIT_REWARD
 
 if not PSUTIL_AVAILABLE:
     logging.warning('psutil is not installed; performance monitoring will use fallback defaults.')
@@ -676,9 +677,9 @@ def update_physics(players, enemies, bullets, explosions, wall_rects,
                     killed_player=killed_player,
                     took_damage=False
                 )
-                # 击中奖励叠加（帧级事件，不在协同奖励里）
+                # 击中奖励叠加（帧级事件，权重由 GA 优化）
                 if hit_player and not killed_player:
-                    reward += 5.0
+                    reward += enemy_hybrid.reward_weights.get('hit_reward', DEFAULT_HIT_REWARD)
 
                 # 直线射击奖励（修复：之前 reset 前未读取）
                 if straight_shot:
@@ -934,19 +935,20 @@ def _start_metrics_window(q):
         logging.error("Metrics window crashed: %s", exc)
 
 
-def _build_metrics_payload(agent, survival_time, hybrid_wins_this_game):
-    STATE_SPACE_SIZE = 1728
+def _build_metrics_payload(agent, survival_time, hybrid_wins_this_game, damage_inflicted=0):
+    STATE_SPACE_SIZE = 3456  # 8维状态: 3×3×3×4×2×2×4×2
     return {
-        'games_played':     agent.games_played,
-        'exploration_rate': agent.q_agent.exploration_rate,
-        'q_table_coverage': len(agent.q_agent.q_table) / STATE_SPACE_SIZE,
-        'ga_generation':    agent.genetic_optimizer.generation,
-        'best_fitness':     agent.genetic_optimizer.best_fitness,
-        'ga_diversity':     agent.genetic_optimizer.get_population_diversity(),
-        'reward_weights':   dict(agent.reward_weights),
-        'survival_time':    survival_time,
-        'hybrid_wins':      hybrid_wins_this_game,
-        'player_wins':      1 - hybrid_wins_this_game,
+        'games_played':       agent.games_played,
+        'exploration_rate':   agent.q_agent.exploration_rate,
+        'q_table_coverage':   len(agent.q_agent.q_table) / STATE_SPACE_SIZE,
+        'ga_generation':      agent.genetic_optimizer.generation,
+        'best_fitness':       agent.genetic_optimizer.best_fitness,
+        'ga_diversity':       agent.genetic_optimizer.get_population_diversity(),
+        'reward_weights':     dict(agent.reward_weights),
+        'survival_time':      survival_time,
+        'hybrid_wins':        hybrid_wins_this_game,
+        'player_wins':        1 - hybrid_wins_this_game,
+        'damage_inflicted':   damage_inflicted,
     }
 
 
@@ -1064,7 +1066,7 @@ def main():
                     if _metrics_queue is not None and global_hybrid_agents:
                         try:
                             _metrics_queue.put_nowait(_build_metrics_payload(
-                                global_hybrid_agents[0], survival_time, game_stats['hybrid_wins']))
+                                global_hybrid_agents[0], survival_time, game_stats['hybrid_wins'], game_stats.get('damage_inflicted', 0)))
                         except Exception:
                             pass
 
@@ -1106,7 +1108,7 @@ def main():
                 if _metrics_queue is not None and global_hybrid_agents:
                     try:
                         _metrics_queue.put_nowait(_build_metrics_payload(
-                            global_hybrid_agents[0], survival_time, game_stats['hybrid_wins']))
+                            global_hybrid_agents[0], survival_time, game_stats['hybrid_wins'], game_stats.get('damage_inflicted', 0)))
                     except Exception:
                         pass
 
@@ -1168,7 +1170,7 @@ def main():
                     if _metrics_queue is not None and global_hybrid_agents:
                         try:
                             _metrics_queue.put_nowait(_build_metrics_payload(
-                                global_hybrid_agents[0], survival_time, game_stats['hybrid_wins']))
+                                global_hybrid_agents[0], survival_time, game_stats['hybrid_wins'], game_stats.get('damage_inflicted', 0)))
                         except Exception:
                             pass
 
