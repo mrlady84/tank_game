@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('main.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tank_ai.py'\\).read\\(\\)\\); print\\('tank_ai.py OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m unittest discover tests/)",
+      "Bash(python *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python3 -c \"import multiprocessing; print\\(multiprocessing.get_start_method\\(\\)\\)\")",
+      "Bash(python3 -c \"import tkinter; print\\('tkinter ok'\\)\")",
+      "Bash(python3 -c \"import matplotlib; print\\('matplotlib ok'\\)\")"
+    ]
+  }
+}
